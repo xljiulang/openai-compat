@@ -15,8 +15,8 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// Chat request after compatibility preparation.
 #[derive(Debug, Clone)]
 pub struct PreparedChatRequest {
-    /// Body sent to the upstream.
-    body: Option<Bytes>,
+    /// Replacement body. `None` means the original request bytes are reused.
+    pub(crate) body: Option<Bytes>,
     /// Whether the original client requested SSE.
     pub downstream_stream: bool,
     /// Model requested by the client.
@@ -57,9 +57,7 @@ pub fn parse_chat_request(bytes: &[u8]) -> Option<Value> {
 /// Parses a Chat request and forces `stream:true` for the upstream.
 ///
 /// Valid JSON objects are returned to the caller for host-specific mutations.
-/// Transport compression is deliberately left to the host: callers should use
-/// [`force_top_level_stream_true`] when they want to preserve the original bytes
-/// while only changing the top-level `stream` field.
+/// Byte changes preserve every field except the top-level `stream` value.
 pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
     let Ok(Value::Object(mut object)) = serde_json::from_slice::<Value>(bytes) else {
         return PreparedChat {
@@ -85,8 +83,7 @@ pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
     let stream_was_true = object.get("stream") == Some(&Value::Bool(true));
     object.insert("stream".to_string(), Value::Bool(true));
     let value = Value::Object(object);
-    let changed = !stream_was_true;
-    let body_changed = changed;
+    let body_changed = !stream_was_true;
     PreparedChat {
         request: PreparedChatRequest {
             body: body_changed.then(|| force_top_level_stream_true(bytes)),
@@ -153,7 +150,9 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
                             value_start += 1;
                         }
                         let mut value_end = value_start;
-                        while value_end < bytes.len() && !matches!(bytes[value_end], b',' | b'}') {
+                        while value_end < bytes.len()
+                            && !matches!(bytes[value_end], b',' | b'}')
+                        {
                             value_end += 1;
                         }
                         while value_end > value_start && bytes[value_end - 1].is_ascii_whitespace()
@@ -161,7 +160,7 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
                             value_end -= 1;
                         }
                         return match &bytes[value_start..value_end] {
-                            b"true" => Bytes::new(),
+                            b"true" => Bytes::copy_from_slice(bytes),
                             b"false" => {
                                 let mut replaced =
                                     Vec::with_capacity(bytes.len().saturating_sub(4));
@@ -191,7 +190,7 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
     if depth != 0 {
         return Bytes::copy_from_slice(bytes);
     }
-    if let (Some(closing), true) = (closing, true) {
+    if let Some(closing) = closing {
         let previous = bytes[..closing]
             .iter()
             .rfind(|byte| !byte.is_ascii_whitespace())
@@ -335,9 +334,10 @@ impl ChatCompletionAccumulator {
                 .filter(|refusal| !refusal.is_empty())
             {
                 state.has_content = true;
-                state
-                    .content_parts
-                    .push(json!({"type": "refusal", "refusal": refusal}));
+                state.content_parts.push(json!({
+                    "type": "refusal",
+                    "refusal": refusal
+                }));
             }
             if let Some(reasoning) = crate::responses::reasoning_text(delta) {
                 state.reasoning_content.push_str(&reasoning);
@@ -416,60 +416,90 @@ impl ChatCompletionAccumulator {
                 "上游 SSE 已完成但没有有效输出",
             ));
         }
-        let choices = self.choices.into_iter().map(|(index, mut choice)| {
-            if choice.finish_reason.is_none() {
-                return Err(ChatError::new("incomplete_stream", "upstream_error", format!("choice {index} 有输出但缺少 finish_reason")));
-            }
-            let mut message = json!({
-                "role": "assistant",
-                "content": if !choice.content_parts.is_empty() {
-                    let mut parts = Vec::new();
-                    if !choice.content.is_empty() {
-                        parts.push(json!({"type": "text", "text": choice.content}));
-                    }
-                    parts.extend(choice.content_parts);
-                    Value::Array(parts)
-                } else if choice.has_content {
-                    Value::String(choice.content)
-                } else {
-                    Value::Null
+        let choices = self
+            .choices
+            .into_iter()
+            .map(|(index, mut choice)| {
+                if choice.finish_reason.is_none() {
+                    return Err(ChatError::new(
+                        "incomplete_stream",
+                        "upstream_error",
+                        format!("choice {index} 有输出但缺少 finish_reason"),
+                    ));
                 }
-            });
-            if !choice.reasoning_content.is_empty() {
-                message["reasoning_content"] = Value::String(choice.reasoning_content);
-            }
-            if !choice.tool_calls.is_empty() {
-                let mut calls = Vec::with_capacity(choice.tool_calls.len());
-                for tool in choice.tool_calls.into_values() {
-                    if tool.name.is_empty() {
-                        return Err(ChatError::new("upstream_tool_call_dropped", "upstream_error", "tool call 缺少函数名"));
-                    }
-                    let arguments = if !tool.saw_arguments || tool.arguments.trim().is_empty() {
-                        "{}".to_string()
-                    } else {
-                        if !serde_json::from_str::<Value>(&tool.arguments).is_ok_and(|value| value.is_object()) {
-                            return Err(ChatError::new("malformed_tool_call_arguments", "upstream_error", "tool call 参数不是合法 JSON 对象"));
+                let mut message = json!({
+                    "role": "assistant",
+                    "content": if !choice.content_parts.is_empty() {
+                        let mut parts = Vec::new();
+                        if !choice.content.is_empty() {
+                            parts.push(json!({"type": "text", "text": choice.content}));
                         }
-                        tool.arguments
-                    };
-                    calls.push(json!({
-                        "id": tool.id,
-                        "type": if tool.kind.is_empty() { "function" } else { tool.kind.as_str() },
-                        "function": {"name": tool.name, "arguments": arguments}
-                    }));
+                        parts.extend(choice.content_parts);
+                        Value::Array(parts)
+                    } else if choice.has_content {
+                        Value::String(choice.content)
+                    } else {
+                        Value::Null
+                    }
+                });
+                if !choice.reasoning_content.is_empty() {
+                    message["reasoning_content"] = Value::String(choice.reasoning_content);
                 }
-                message["tool_calls"] = Value::Array(calls);
-                if choice.finish_reason.as_deref() != Some("length") && choice.finish_reason.as_deref() != Some("content_filter") {
-                    choice.finish_reason = Some("tool_calls".to_string());
+                if !choice.tool_calls.is_empty() {
+                    let mut calls = Vec::with_capacity(choice.tool_calls.len());
+                    for tool in choice.tool_calls.into_values() {
+                        if tool.name.is_empty() {
+                            return Err(ChatError::new(
+                                "upstream_tool_call_dropped",
+                                "upstream_error",
+                                "tool call 缺少函数名",
+                            ));
+                        }
+                        let arguments = if !tool.saw_arguments || tool.arguments.trim().is_empty() {
+                            "{}".to_string()
+                        } else {
+                            if !serde_json::from_str::<Value>(&tool.arguments)
+                                .is_ok_and(|value| value.is_object())
+                            {
+                                return Err(ChatError::new(
+                                    "malformed_tool_call_arguments",
+                                    "upstream_error",
+                                    "tool call 参数不是合法 JSON 对象",
+                                ));
+                            }
+                            tool.arguments
+                        };
+                        calls.push(json!({
+                            "id": tool.id,
+                            "type": if tool.kind.is_empty() { "function" } else { tool.kind.as_str() },
+                            "function": {"name": tool.name, "arguments": arguments}
+                        }));
+                    }
+                    message["tool_calls"] = Value::Array(calls);
+                    if choice.finish_reason.as_deref() != Some("length")
+                        && choice.finish_reason.as_deref() != Some("content_filter")
+                    {
+                        choice.finish_reason = Some("tool_calls".to_string());
+                    }
+                } else if matches!(
+                    choice.finish_reason.as_deref(),
+                    Some("tool_calls" | "function_call")
+                ) {
+                    return Err(ChatError::new(
+                        "incomplete_stream",
+                        "upstream_error",
+                        format!("choice {index} 以 tool_calls 结束但没有工具调用"),
+                    ));
                 }
-            } else if matches!(choice.finish_reason.as_deref(), Some("tool_calls" | "function_call")) {
-                return Err(ChatError::new("incomplete_stream", "upstream_error", format!("choice {index} 以 tool_calls 结束但没有工具调用")));
-            }
-            if let Some(function_call) = choice.legacy_function_call {
-                message["function_call"] = json!({"name": function_call.name, "arguments": function_call.arguments});
-            }
-            Ok(json!({"index": index, "message": message, "finish_reason": choice.finish_reason}))
-        }).collect::<Result<Vec<_>, _>>()?;
+                if let Some(function_call) = choice.legacy_function_call {
+                    message["function_call"] = json!({
+                        "name": function_call.name,
+                        "arguments": function_call.arguments
+                    });
+                }
+                Ok(json!({"index": index, "message": message, "finish_reason": choice.finish_reason}))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut completion = json!({
             "id": self.id.unwrap_or_else(|| format!("chatcmpl_{}", now_millis())),
             "object": "chat.completion",
@@ -488,7 +518,10 @@ impl ChatCompletionAccumulator {
 }
 
 /// Processes one complete SSE line.
-pub fn process_sse_line(acc: &mut ChatCompletionAccumulator, line: &[u8]) -> Result<(), ChatError> {
+pub fn process_sse_line(
+    acc: &mut ChatCompletionAccumulator,
+    line: &[u8],
+) -> Result<(), ChatError> {
     let line = String::from_utf8_lossy(line);
     let Some(payload) = line.trim_end().strip_prefix("data:") else {
         return Ok(());
@@ -562,135 +595,4 @@ fn now_millis() -> u128 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn preparation_forces_upstream_stream_and_keeps_client_intent() {
-        let input = br#"{"model":"deepseek-v4","stream":false}"#;
-        let prepared = prepare_chat_request(input);
-        let value = prepared
-            .value
-            .as_ref()
-            .expect("valid JSON object should be parsed");
-
-        assert_eq!(value["stream"], true);
-        assert!(!prepared.request.downstream_stream);
-        assert_eq!(prepared.request.requested_model, "deepseek-v4");
-        assert!(prepared.body_changed);
-        let body: Value = serde_json::from_slice(&prepared.rewritten_body().unwrap()).unwrap();
-        assert_eq!(body["stream"], true);
-    }
-
-    #[test]
-    fn preparation_defaults_missing_stream_to_non_streaming() {
-        let input = br#"{"model":"model"}"#;
-        let prepared = prepare_chat_request(input);
-        let value = prepared.value.as_ref().unwrap();
-
-        assert_eq!(value["stream"], true);
-        assert!(!prepared.request.downstream_stream);
-        assert!(prepared.body_changed);
-    }
-
-    #[test]
-    fn preparation_preserves_original_streaming_intent_and_non_json_body() {
-        let input = br#"{"model":"model","stream":true}"#;
-        let prepared = prepare_chat_request(input);
-        assert_eq!(prepared.value.as_ref().unwrap()["stream"], true);
-        assert!(prepared.request.downstream_stream);
-        assert!(!prepared.body_changed);
-
-        let prepared = prepare_chat_request(b"not json");
-        assert!(!prepared.request.valid_json_object);
-        assert!(!prepared.request.downstream_stream);
-        assert!(prepared.rewritten_body().is_none());
-        assert!(prepared.value.is_none());
-        assert!(!prepared.body_changed);
-    }
-
-    #[test]
-    fn aggregation_combines_text_reasoning_and_tools() {
-        let mut accumulator = ChatCompletionAccumulator::default();
-        process_sse_line(
-            &mut accumulator,
-            br#"data: {"id":"chatcmpl-1","created":1,"model":"upstream","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}"#,
-        )
-        .unwrap();
-        process_sse_line(
-            &mut accumulator,
-            br#"data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}"#,
-        )
-        .unwrap();
-        process_sse_line(
-            &mut accumulator,
-            br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"run","arguments":"{\"a\":"}}]},"finish_reason":"tool_calls"}]}"#,
-        )
-        .unwrap();
-        process_sse_line(
-            &mut accumulator,
-            br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":null}]}"#,
-        )
-        .unwrap();
-        process_sse_line(
-            &mut accumulator,
-            br#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#,
-        )
-        .unwrap();
-        process_sse_line(&mut accumulator, b"data: [DONE]").unwrap();
-
-        let result = accumulator.finish("requested").unwrap();
-        assert_eq!(result["model"], "upstream");
-        assert_eq!(result["choices"][0]["message"]["content"], "hello");
-        assert_eq!(
-            result["choices"][0]["message"]["reasoning_content"],
-            "think"
-        );
-        assert_eq!(
-            result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
-            "{\"a\":1}"
-        );
-        assert_eq!(
-            result["choices"][0]["message"]["tool_calls"][0]["id"],
-            "call-1"
-        );
-        assert_eq!(result["usage"]["total_tokens"], 7);
-    }
-
-    #[test]
-    fn aggregation_rejects_truncated_and_error_streams() {
-        let mut accumulator = ChatCompletionAccumulator::default();
-        process_sse_line(
-            &mut accumulator,
-            br#"data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            accumulator.finish("model").unwrap_err().code,
-            "incomplete_stream"
-        );
-
-        let mut accumulator = ChatCompletionAccumulator::default();
-        assert!(process_sse_line(
-            &mut accumulator,
-            br#"data: {"error":{"message":"rate limited"}}"#,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn aggregation_merges_multiple_choices() {
-        let mut accumulator = ChatCompletionAccumulator::default();
-        process_sse_line(
-            &mut accumulator,
-            br#"data: {"choices":[{"index":1,"delta":{"content":"second"},"finish_reason":"stop"},{"index":0,"delta":{"content":"first"},"finish_reason":"stop"}],"usage":{"total_tokens":2}}"#,
-        )
-        .unwrap();
-
-        let result = accumulator.finish("model").unwrap();
-        assert_eq!(result["choices"][0]["index"], 0);
-        assert_eq!(result["choices"][0]["message"]["content"], "first");
-        assert_eq!(result["choices"][1]["index"], 1);
-        assert_eq!(result["choices"][1]["message"]["content"], "second");
-    }
-}
+mod tests;
