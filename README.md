@@ -34,12 +34,14 @@ OpenAI，也不是官方项目，不包含任何网关、服务端或产品逻�
 
 ## 快速开始
 
-本库暂未发布到 crates.io（`publish = false`），通过 Git 依赖并按 commit 固定：
+本库暂未发布到 crates.io（`publish = false`），通过 Git 依赖并按 tag 固定：
 
 ```toml
 [dependencies]
-openai-compat = { git = "https://github.com/xljiulang/openai-compat.git", rev = "<commit>" }
+openai-compat = { git = "https://github.com/xljiulang/openai-compat.git", tag = "v0.2.0" }
 ```
+
+需要跟随最新开发状态时可改用 `branch = "main"`；正式使用请固定 tag。
 
 ### Chat 请求准备
 
@@ -175,6 +177,8 @@ minor 版本。
 - 流式 Responses 请求会带 `stream_options.include_usage: true`，下游显式给出
   的值不受影响。
 - 上游返回的流不是合法 JSON 时，错误从 `InvalidInput` 归为 `Upstream`。
+
+完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开发
 
