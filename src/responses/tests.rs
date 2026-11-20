@@ -128,8 +128,8 @@ fn prepared_responses_returns_one_consistent_tool_shape_and_diagnostics() {
         "openai_compat_tool_search"
     );
     assert_eq!(prepared.shape().resolve("ns__run").0, "run");
-    assert!(prepared.unsupported().is_empty());
-    assert!(prepared.ignored().is_empty());
+    assert_eq!(prepared.unsupported(), Vec::<&str>::new());
+    assert_eq!(prepared.ignored(), Vec::<String>::new());
 }
 
 #[test]
@@ -1163,7 +1163,10 @@ fn maps_empty_custom_tool_arguments_to_empty_input() {
     }));
     events.extend(stream.finish());
 
-    assert!(named_events(&events, "response.custom_tool_call_input.delta").is_empty());
+    assert_eq!(
+        named_events(&events, "response.custom_tool_call_input.delta"),
+        Vec::<serde_json::Value>::new()
+    );
     let done = named_events(&events, "response.custom_tool_call_input.done");
     assert_eq!(done.len(), 1);
     assert_eq!(done[0]["input"], "");
@@ -1219,7 +1222,10 @@ fn waits_for_late_tool_name_before_emitting_custom_item() {
     assert_eq!(added.len(), 1);
     assert_eq!(added[0]["item"]["type"], "custom_tool_call");
     assert_eq!(added[0]["item"]["name"], "apply_patch");
-    assert!(named_events(&events, "response.function_call_arguments.delta").is_empty());
+    assert_eq!(
+        named_events(&events, "response.function_call_arguments.delta"),
+        Vec::<serde_json::Value>::new()
+    );
     let done = named_events(&events, "response.custom_tool_call_input.done");
     assert_eq!(done.len(), 1);
     assert_eq!(done[0]["input"], patch);
@@ -1790,7 +1796,10 @@ fn truncated_tool_arguments_are_incomplete_not_failed() {
     );
     assert_eq!(deltas, "{\"path\":");
     assert_eq!(done[0]["arguments"], "{\"path\":");
-    assert!(named_events(&events, "response.failed").is_empty());
+    assert_eq!(
+        named_events(&events, "response.failed"),
+        Vec::<serde_json::Value>::new()
+    );
 }
 
 #[test]
@@ -1810,7 +1819,10 @@ fn stream_done_without_finish_reason_and_output_is_incomplete() {
         incomplete["response"]["output"][0]["content"][0]["text"],
         "partial"
     );
-    assert!(named_events(&events, "response.failed").is_empty());
+    assert_eq!(
+        named_events(&events, "response.failed"),
+        Vec::<serde_json::Value>::new()
+    );
 }
 
 #[test]
@@ -1821,7 +1833,10 @@ fn stream_done_without_finish_reason_or_output_fails() {
     let failed = terminal_response(&events, "response.failed");
     assert_eq!(failed["response"]["status"], "failed");
     assert_eq!(failed["response"]["error"]["code"], "incomplete_stream");
-    assert!(named_events(&events, "response.completed").is_empty());
+    assert_eq!(
+        named_events(&events, "response.completed"),
+        Vec::<serde_json::Value>::new()
+    );
 }
 
 #[test]
@@ -2749,9 +2764,18 @@ fn stream_ignores_whitespace_only_reasoning() {
     })));
     events.extend(stream.finish());
 
-    assert!(named_events(&events, "response.reasoning_summary_part.added").is_empty());
-    assert!(named_events(&events, "response.reasoning_summary_text.delta").is_empty());
-    assert!(named_events(&events, "response.reasoning_summary_text.done").is_empty());
+    assert_eq!(
+        named_events(&events, "response.reasoning_summary_part.added"),
+        Vec::<serde_json::Value>::new()
+    );
+    assert_eq!(
+        named_events(&events, "response.reasoning_summary_text.delta"),
+        Vec::<serde_json::Value>::new()
+    );
+    assert_eq!(
+        named_events(&events, "response.reasoning_summary_text.done"),
+        Vec::<serde_json::Value>::new()
+    );
     let completed = terminal_response(&events, "response.completed");
     assert!(completed["response"]["output"]
         .as_array()
@@ -2771,8 +2795,14 @@ fn stream_ignores_whitespace_only_inline_think() {
     }));
     events.extend(stream.finish());
 
-    assert!(named_events(&events, "response.reasoning_summary_part.added").is_empty());
-    assert!(named_events(&events, "response.reasoning_summary_text.delta").is_empty());
+    assert_eq!(
+        named_events(&events, "response.reasoning_summary_part.added"),
+        Vec::<serde_json::Value>::new()
+    );
+    assert_eq!(
+        named_events(&events, "response.reasoning_summary_text.delta"),
+        Vec::<serde_json::Value>::new()
+    );
     let completed = terminal_response(&events, "response.completed");
     assert_eq!(completed["response"]["output"][0]["type"], "message");
     assert_eq!(
@@ -2808,7 +2838,10 @@ fn stream_preserves_leading_and_interior_reasoning_whitespace_after_valid_start(
             "finish_reason": null
         }]
     }));
-    assert!(named_events(&events, "response.reasoning_summary_part.added").is_empty());
+    assert_eq!(
+        named_events(&events, "response.reasoning_summary_part.added"),
+        Vec::<serde_json::Value>::new()
+    );
     events.extend(stream.push(&json!({
         "choices": [{
             "delta": { "reasoning_content": "thinking" },
@@ -3282,8 +3315,11 @@ fn stream_does_not_publish_empty_shell_tool_calls() {
         .as_array()
         .unwrap()
         .clone();
-    assert!(output.is_empty());
-    assert!(named_events(&events, "response.output_item.done").is_empty());
+    assert_eq!(output, Vec::<serde_json::Value>::new());
+    assert_eq!(
+        named_events(&events, "response.output_item.done"),
+        Vec::<serde_json::Value>::new()
+    );
 }
 
 #[test]
@@ -3300,7 +3336,10 @@ fn stream_keeps_late_tool_identity_for_finish() {
             "finish_reason": "tool_calls"
         }]
     }));
-    assert!(named_events(&first, "response.output_item.done").is_empty());
+    assert_eq!(
+        named_events(&first, "response.output_item.done"),
+        Vec::<serde_json::Value>::new()
+    );
     let mut events = first;
     events.extend(stream.finish());
     let failed = terminal_response(&events, "response.failed");
