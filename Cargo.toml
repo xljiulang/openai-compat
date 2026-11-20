@@ -1,0 +1,20 @@
+[package]
+name = "openai-compat"
+version = "0.1.0"
+edition = "2021"
+description = "OpenAI Responses and Chat Completions protocol compatibility translation"
+license = "MIT"
+repository = "https://github.com/xljiulang/openai-compat"
+publish = false
+
+[lib]
+name = "openai_compat"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
