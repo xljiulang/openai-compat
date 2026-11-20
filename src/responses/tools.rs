@@ -3,6 +3,10 @@ use super::*;
 const CHAT_TOOL_NAME_MAX_BYTES: usize = 64;
 pub(super) const TOOL_SEARCH_PROXY_NAME: &str = "openai_compat_tool_search";
 
+/// Request-local tool name mapping used to translate responses back.
+///
+/// It records which Responses tool names the upstream was told about, so tool
+/// calls that come back with flattened or namespaced names can be restored.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct ToolShape {

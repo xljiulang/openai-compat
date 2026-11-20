@@ -1,12 +1,21 @@
 use super::*;
 use crate::CompatError;
+use std::sync::Arc;
 
-/// Optional host-specific cleanup applied to assistant text.
+/// Cleanup applied to assistant text before it reaches the client.
 ///
 /// It is called for non-streaming content and for every streaming text delta.
-pub type ResponseCleaner = fn(&str) -> String;
+/// The closure may capture per-request configuration, so two concurrent
+/// requests can use different rules.
+pub type ResponseCleaner = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 /// Translates a non-streaming Chat completion into a Responses object.
+///
+/// # Errors
+///
+/// Returns [`crate::ErrorKind::Upstream`] when the completion carries neither
+/// output nor a finish reason, or when a tool call's arguments are not a JSON
+/// object.
 pub fn chat_to_responses(
     chat: &Value,
     model: &str,
@@ -15,7 +24,11 @@ pub fn chat_to_responses(
     chat_to_responses_with_cleaner(chat, model, shape, None)
 }
 
-/// Translates a Chat completion with an optional product-specific cleaner.
+/// Translates a Chat completion with an optional assistant-text cleaner.
+///
+/// # Errors
+///
+/// Same as [`chat_to_responses`].
 pub fn chat_to_responses_with_cleaner(
     chat: &Value,
     model: &str,
@@ -50,7 +63,7 @@ pub fn chat_to_responses_with_cleaner(
             Some(Value::String(content)) => {
                 let (reasoning, answer) = split_leading_think_block(content);
                 inline_reasoning = reasoning;
-                push_output_text(&mut content_parts, &clean_text(cleaner, &answer));
+                push_output_text(&mut content_parts, &clean_text(cleaner.as_ref(), &answer));
             }
             Some(Value::Array(parts)) => {
                 for part in parts {
@@ -61,7 +74,10 @@ pub fn chat_to_responses_with_cleaner(
                                 if inline_reasoning.is_none() {
                                     inline_reasoning = reasoning;
                                 }
-                                push_output_text(&mut content_parts, &clean_text(cleaner, &answer));
+                                push_output_text(
+                                    &mut content_parts,
+                                    &clean_text(cleaner.as_ref(), &answer),
+                                );
                             }
                         }
                         Some("refusal") => {
@@ -161,9 +177,9 @@ pub fn chat_to_responses_with_cleaner(
     Ok(response)
 }
 
-fn clean_text(cleaner: Option<ResponseCleaner>, text: &str) -> String {
+fn clean_text(cleaner: Option<&ResponseCleaner>, text: &str) -> String {
     cleaner
-        .map(|cleaner| cleaner(text))
+        .map(|cleaner| cleaner.as_ref()(text))
         .unwrap_or_else(|| text.to_string())
 }
 

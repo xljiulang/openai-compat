@@ -12,7 +12,7 @@ use super::*;
 
 /// Placeholder replacing an image that was moved out of a tool result.
 pub(super) const TOOL_MEDIA_MOVED: &str =
-    "Tool output media was moved to the following user message by the proxy.";
+    "Tool output media was moved to the following user message by openai-compat.";
 
 /// Data URLs shorter than this stay inline; they are almost certainly icons or
 /// sample values rather than an image the model needs to look at.

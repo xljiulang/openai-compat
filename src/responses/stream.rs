@@ -2,9 +2,9 @@ use super::*;
 use bytes::Bytes;
 use std::io::Write as _;
 
-fn clean_text(cleaner: Option<ResponseCleaner>, text: &str) -> String {
+fn clean_text(cleaner: Option<&ResponseCleaner>, text: &str) -> String {
     cleaner
-        .map(|cleaner| cleaner(text))
+        .map(|cleaner| cleaner.as_ref()(text))
         .unwrap_or_else(|| text.to_string())
 }
 
@@ -61,6 +61,8 @@ pub struct ResponsesStream {
     failure: Option<Failure>,
     finished: bool,
     cleaner: Option<ResponseCleaner>,
+    max_bytes: usize,
+    bytes_received: usize,
 }
 
 impl ResponsesStream {
@@ -74,7 +76,7 @@ impl ResponsesStream {
         Self::with_shape_and_cleaner(response_id, model, shape, None)
     }
 
-    /// Creates a translator with a host-specific assistant text cleaner.
+    /// Creates a translator with a caller-supplied assistant text cleaner.
     pub fn with_shape_and_cleaner(
         response_id: String,
         model: String,
@@ -103,7 +105,23 @@ impl ResponsesStream {
             failure: None,
             finished: false,
             cleaner,
+            max_bytes: crate::DEFAULT_MAX_RESPONSE_BYTES,
+            bytes_received: 0,
         }
+    }
+
+    /// Caps how much translated output the stream keeps in memory.
+    ///
+    /// The cap covers the text, reasoning and tool-call arguments retained while
+    /// the response streams. Once it is breached the response fails with
+    /// `response_too_large`, because a streaming translation cannot report the
+    /// output it refused to hold. A cap of `0` rejects any retained output. It
+    /// composes with any constructor, for example
+    /// `ResponsesStream::with_shape(..).with_max_bytes(1024 * 1024)`.
+    #[must_use]
+    pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = max_bytes;
+        self
     }
 
     /// Translates one Chat completion chunk into zero or more Responses SSE events.
@@ -162,17 +180,29 @@ impl ResponsesStream {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
             if let Some(reasoning) = self.reasoning_fragment(delta) {
                 events.extend(self.reasoning_text_fragment(&reasoning));
+                if self.exceeded_limit() {
+                    events.extend(self.finish());
+                    return events;
+                }
             }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
-                    let content = clean_text(self.cleaner, content);
+                    let content = clean_text(self.cleaner.as_ref(), content);
                     events.extend(self.inline_content_delta(&content));
+                    if self.exceeded_limit() {
+                        events.extend(self.finish());
+                        return events;
+                    }
                 }
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 events.extend(self.flush_inline_think());
                 for call in calls {
                     events.extend(self.tool_delta(call));
+                    if self.exceeded_limit() {
+                        events.extend(self.finish());
+                        return events;
+                    }
                 }
             }
             if let Some(reason) = choice
@@ -355,6 +385,31 @@ impl ResponsesStream {
         self.finish()
     }
 
+    /// Counts retained output bytes against the configured limit.
+    fn account(&mut self, bytes: usize) {
+        self.bytes_received = self.bytes_received.saturating_add(bytes);
+    }
+
+    /// Turns a breached limit into a terminal failure and reports it.
+    ///
+    /// The translator holds the whole output so it can emit `*.done` events and
+    /// the final Responses object. Once that is over budget the response cannot
+    /// be completed faithfully, so it fails instead of truncating.
+    fn exceeded_limit(&mut self) -> bool {
+        if self.bytes_received <= self.max_bytes {
+            return false;
+        }
+        if self.failure.is_none() {
+            self.failure = Some(Failure {
+                error_type: "upstream_error".to_string(),
+                code: "response_too_large".to_string(),
+                message: "translated upstream stream exceeds the configured limit".to_string(),
+                param: None,
+            });
+        }
+        true
+    }
+
     fn ensure_created(&mut self) -> Vec<Bytes> {
         if self.created {
             return Vec::new();
@@ -486,6 +541,7 @@ impl ResponsesStream {
 
     fn reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
         let mut events = self.reasoning_start();
+        self.account(delta.len());
         let track = self
             .reasoning
             .as_mut()
@@ -562,6 +618,7 @@ impl ResponsesStream {
                 }),
             ));
         }
+        self.account(delta.len());
         let track = self.text.as_mut().unwrap();
         track.text.push_str(delta);
         events.push(sse_event(
@@ -934,6 +991,11 @@ impl ResponsesStream {
         let tool_index = self.resolve_tool_key(call);
         let mut events = Vec::new();
         let was_added = self.calls.get(&tool_index).is_some_and(|track| track.added);
+        let arguments = call
+            .pointer("/function/arguments")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        self.account(arguments.len());
         let state = self.calls.entry(tool_index).or_insert_with(|| CallTrack {
             item_id: String::new(),
             call_id: String::new(),
@@ -969,10 +1031,6 @@ impl ResponsesStream {
         {
             state.extra_content = Some(extra.clone());
         }
-        let arguments = call
-            .pointer("/function/arguments")
-            .and_then(Value::as_str)
-            .unwrap_or("");
         state.arguments.push_str(arguments);
         let item_id = state.item_id.clone();
         let output_index = state.output_index;

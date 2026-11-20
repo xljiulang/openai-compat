@@ -2,8 +2,8 @@
 //!
 //! `responses_to_chat` is a pure function with no logger, so a request can lose
 //! items, content parts or whole tool declarations without anything appearing
-//! in the log. The endpoint calls [`ignored_feature_details`] once per request
-//! to record that degradation.
+//! in the log. A caller can inspect [`PreparedResponses::ignored`] or call
+//! [`ignored_feature_details`] once per request to record that degradation.
 
 use super::request::{is_compaction_turn, is_handled_input_type, text_format_kind};
 use super::*;
@@ -24,6 +24,7 @@ pub fn ignored_feature_details(request: &Value) -> Vec<String> {
     ignored_feature_details_with_options(request, TranslationOptions::default())
 }
 
+/// Lists dropped features while honouring the caller's media capabilities.
 pub fn ignored_feature_details_with_options(
     request: &Value,
     options: TranslationOptions,

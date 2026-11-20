@@ -1,13 +1,27 @@
 use serde_json::Value;
 
+/// Upstream Chat error fields normalized into the Responses error shape.
+///
+/// The payload dialects differ between providers: some nest the fields under
+/// `error`, some send `detail` or `base_resp`, and some return a bare string.
+/// This type is the single decoded shape the crate maps from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChatErrorInfo {
+    /// Human-readable error message.
     pub message: String,
+    /// OpenAI-style error type, or `upstream_error` when the upstream omits it.
     pub error_type: String,
+    /// Machine-readable error code, when the upstream reports one.
     pub code: Option<String>,
+    /// Request parameter the error points at, when reported.
     pub param: Option<String>,
 }
 
+/// Normalizes an upstream Chat error payload.
+///
+/// `None` produces a placeholder describing an empty error response, so callers
+/// never have to synthesize a message themselves.
 pub fn normalize_chat_error(value: Option<&Value>) -> ChatErrorInfo {
     let Some(value) = value else {
         return ChatErrorInfo {
@@ -58,6 +72,9 @@ pub fn normalize_chat_error(value: Option<&Value>) -> ChatErrorInfo {
     }
 }
 
+/// Normalizes an upstream Chat error from raw response text.
+///
+/// Text that is not JSON is kept verbatim as the message.
 pub fn normalize_chat_error_text(text: &str) -> ChatErrorInfo {
     serde_json::from_str::<Value>(text)
         .ok()

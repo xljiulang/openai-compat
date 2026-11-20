@@ -3,9 +3,14 @@ use super::request::{COMPACTION_PLACEHOLDER, COMPACTION_PROMPT, HANDLED_INPUT_TY
 use super::*;
 use bytes::Bytes;
 use serde_json::json;
+use std::sync::Arc;
 
 fn test_cleaner(text: &str) -> String {
     text.replace("secret", "redacted")
+}
+
+fn test_cleaner_arc() -> ResponseCleaner {
+    Arc::new(test_cleaner)
 }
 
 #[test]
@@ -24,9 +29,13 @@ fn non_stream_cleaner_changes_only_text_outputs() {
             "finish_reason": "tool_calls"
         }]
     });
-    let response =
-        chat_to_responses_with_cleaner(&chat, "model", &ToolShape::default(), Some(test_cleaner))
-            .unwrap();
+    let response = chat_to_responses_with_cleaner(
+        &chat,
+        "model",
+        &ToolShape::default(),
+        Some(test_cleaner_arc()),
+    )
+    .unwrap();
 
     assert_eq!(response["output"][0]["content"][0]["text"], "redacted text");
     assert_eq!(response["output"][1]["name"], "secret_tool");
@@ -39,7 +48,7 @@ fn stream_cleaner_changes_only_text_deltas() {
         "resp_clean".to_string(),
         "model".to_string(),
         ToolShape::default(),
-        Some(test_cleaner),
+        Some(test_cleaner_arc()),
     );
     let events = stream.push(&json!({
         "choices": [{
@@ -112,10 +121,10 @@ fn prepared_responses_returns_one_consistent_tool_shape_and_diagnostics() {
     });
     let prepared = prepare_responses(&request, true, TranslationOptions::default()).unwrap();
 
-    assert_eq!(prepared.chat["stream"], true);
-    assert_eq!(prepared.chat["tools"][0]["function"]["name"], "ns__run");
+    assert_eq!(prepared.chat()["stream"], true);
+    assert_eq!(prepared.chat()["tools"][0]["function"]["name"], "ns__run");
     assert_eq!(
-        prepared.chat["tools"][1]["function"]["name"],
+        prepared.chat()["tools"][1]["function"]["name"],
         "openai_compat_tool_search"
     );
     assert!(prepared.shape().resolve("ns__run").0 == "run");
@@ -4234,4 +4243,157 @@ fn drops_tool_controls_when_no_tool_is_sendable() {
 
     assert!(chat.get("tool_choice").is_none());
     assert!(chat.get("parallel_tool_calls").is_none());
+}
+
+#[test]
+fn streaming_request_declares_usage_by_default() {
+    let request = json!({ "model": "model", "input": "hello" });
+
+    let chat = responses_to_chat(&request, true).unwrap();
+
+    assert_eq!(chat["stream"], true);
+    assert_eq!(chat["stream_options"], json!({ "include_usage": true }));
+}
+
+#[test]
+fn non_streaming_request_omits_stream_options() {
+    let request = json!({ "model": "model", "input": "hello" });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert!(chat.get("stream_options").is_none());
+}
+
+#[test]
+fn downstream_include_usage_choice_is_preserved() {
+    let request = json!({
+        "model": "model",
+        "input": "hello",
+        "stream_options": { "include_usage": false }
+    });
+
+    let chat = responses_to_chat(&request, true).unwrap();
+
+    assert_eq!(chat["stream_options"], json!({ "include_usage": false }));
+}
+
+#[test]
+fn downstream_stream_options_keys_survive_with_usage_added() {
+    let request = json!({
+        "model": "model",
+        "input": "hello",
+        "stream_options": { "foo": 1 }
+    });
+
+    let chat = responses_to_chat(&request, true).unwrap();
+
+    assert_eq!(
+        chat["stream_options"],
+        json!({ "foo": 1, "include_usage": true })
+    );
+}
+
+#[test]
+fn malformed_stream_options_is_replaced_with_the_default() {
+    let request = json!({
+        "model": "model",
+        "input": "hello",
+        "stream_options": "unexpected"
+    });
+
+    let chat = responses_to_chat(&request, true).unwrap();
+
+    assert_eq!(chat["stream_options"], json!({ "include_usage": true }));
+}
+
+#[test]
+fn null_include_usage_is_filled_in() {
+    let request = json!({
+        "model": "model",
+        "input": "hello",
+        "stream_options": { "include_usage": null }
+    });
+
+    let chat = responses_to_chat(&request, true).unwrap();
+
+    assert_eq!(chat["stream_options"], json!({ "include_usage": true }));
+}
+
+#[test]
+fn prepared_responses_chat_matches_into_chat() {
+    let request = json!({
+        "model": "model",
+        "input": "hello",
+        "tools": [{ "type": "function", "name": "read" }]
+    });
+    let prepared = prepare_responses(&request, true, TranslationOptions::default()).unwrap();
+    let borrowed = prepared.chat().clone();
+
+    assert_eq!(prepared.into_chat(), borrowed);
+}
+
+#[test]
+fn stream_limit_fails_the_response_instead_of_truncating() {
+    let mut stream =
+        ResponsesStream::new("resp_limit".to_string(), "model".to_string()).with_max_bytes(8);
+
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "0123456789" },
+            "finish_reason": "stop"
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{ "delta": { "content": "more" }, "finish_reason": "stop" }]
+    })));
+    events.extend(stream.finish());
+
+    let failed = named_events(&events, "response.failed");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["response"]["error"]["code"], "response_too_large");
+    assert_eq!(
+        event_names(&events)
+            .iter()
+            .filter(|name| matches!(
+                name.as_str(),
+                "response.completed" | "response.incomplete" | "response.failed"
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn cleaner_closure_captures_per_request_state() {
+    let replacement = "redacted".to_string();
+    let cleaner: ResponseCleaner = Arc::new(move |text: &str| text.replace("secret", &replacement));
+    let chat = json!({
+        "choices": [{
+            "message": { "role": "assistant", "content": "secret text" },
+            "finish_reason": "stop"
+        }]
+    });
+
+    let response = chat_to_responses_with_cleaner(
+        &chat,
+        "model",
+        &ToolShape::default(),
+        Some(cleaner.clone()),
+    )
+    .unwrap();
+    assert_eq!(response["output"][0]["content"][0]["text"], "redacted text");
+
+    let mut stream = ResponsesStream::with_shape_and_cleaner(
+        "resp_closure".to_string(),
+        "model".to_string(),
+        ToolShape::default(),
+        Some(cleaner),
+    );
+    let events = stream.push(&json!({
+        "choices": [{ "delta": { "content": "secret stream" }, "finish_reason": "stop" }]
+    }));
+    let joined = String::from_utf8(events.concat()).unwrap();
+
+    assert!(joined.contains("redacted stream"));
+    assert!(!joined.contains("secret stream"));
 }

@@ -187,3 +187,29 @@ fn aggregation_merges_multiple_choices() {
     assert_eq!(result["choices"][1]["index"], 1);
     assert_eq!(result["choices"][1]["message"]["content"], "second");
 }
+
+#[test]
+fn malformed_upstream_json_is_an_upstream_error() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    let error = process_sse_line(&mut accumulator, b"data: {not json").unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::Upstream);
+    assert!(
+        error.message().is_ascii(),
+        "error message should stay in English: {}",
+        error.message()
+    );
+}
+
+#[test]
+fn incomplete_stream_messages_are_english() {
+    let accumulator = ChatCompletionAccumulator::default();
+    let error = accumulator.finish("model").unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::IncompleteStream);
+    assert!(
+        error.message().is_ascii(),
+        "error message should stay in English: {}",
+        error.message()
+    );
+}

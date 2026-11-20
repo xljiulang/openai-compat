@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MISSING_TOOL_OUTPUT: &str =
-    "Tool output was missing from conversation history and has been replaced by the proxy.";
+    "Tool output was missing from conversation history and has been replaced by openai-compat.";
 
 mod canonical;
 mod diagnostics;

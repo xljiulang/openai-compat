@@ -16,9 +16,9 @@ pitfalls to avoid.
 Keep exact identifiers, paths and error strings. Do not call tools. Do not ask questions. \
 Output only the note.";
 
-/// Stand-in for a compaction checkpoint this proxy cannot read.
+/// Stand-in for a compaction checkpoint this crate cannot read.
 pub(super) const COMPACTION_PLACEHOLDER: &str = "\
-[The client compacted the earlier conversation into a checkpoint this proxy cannot read, \
+[The client compacted the earlier conversation into a checkpoint openai-compat cannot read, \
 so the summary text is unavailable. Rely on the messages that remain.]";
 
 /// Item types that only exist to carry a compaction checkpoint.
@@ -44,6 +44,10 @@ pub(super) const DEGRADED_INPUT_TYPES: [&str; 7] = [
     "web_search_call",
 ];
 
+/// Declares which media inputs the target model accepts.
+///
+/// Translations still work when everything is unsupported; the only difference
+/// is that file and audio parts are reported as degraded instead of forwarded.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct TranslationOptions {
@@ -60,10 +64,12 @@ impl TranslationOptions {
         }
     }
 
+    /// Returns whether file inputs are forwarded to the target model.
     pub fn supports_file_input(self) -> bool {
         self.supports_file_input
     }
 
+    /// Returns whether audio inputs are forwarded to the target model.
     pub fn supports_audio_input(self) -> bool {
         self.supports_audio_input
     }
@@ -76,13 +82,23 @@ impl TranslationOptions {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PreparedResponses {
-    pub chat: Value,
-    pub shape: ToolShape,
-    pub ignored: Vec<String>,
-    pub unsupported: Vec<&'static str>,
+    chat: Value,
+    shape: ToolShape,
+    ignored: Vec<String>,
+    unsupported: Vec<&'static str>,
 }
 
 impl PreparedResponses {
+    /// Returns the upstream Chat Completions body.
+    pub fn chat(&self) -> &Value {
+        &self.chat
+    }
+
+    /// Consumes the prepared request and returns the upstream Chat body.
+    pub fn into_chat(self) -> Value {
+        self.chat
+    }
+
     /// Returns the reverse tool mapping required by response translation.
     pub fn shape(&self) -> &ToolShape {
         &self.shape
@@ -100,10 +116,21 @@ impl PreparedResponses {
 }
 
 /// Translates a Responses request into a Chat Completions request.
+///
+/// # Errors
+///
+/// Returns [`crate::ErrorKind::InvalidInput`] when the request is not a JSON
+/// object, and [`crate::ErrorKind::NameConflict`] when a declared tool name
+/// collides with a reserved name.
 pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, CompatError> {
     responses_to_chat_with_options(request, want_stream, TranslationOptions::default())
 }
 
+/// Translates a Responses request with explicit media capabilities.
+///
+/// # Errors
+///
+/// Same as [`responses_to_chat`].
 pub fn responses_to_chat_with_options(
     request: &Value,
     want_stream: bool,
@@ -164,6 +191,9 @@ fn responses_to_chat_with_parts(
         "messages": messages,
         "stream": want_stream
     });
+    if want_stream {
+        chat["stream_options"] = stream_options(request);
+    }
     if !declared.tools.is_empty() {
         let translated = translate_tools(&declared.tools);
         if !translated.is_empty() {
@@ -229,9 +259,13 @@ fn responses_to_chat_with_parts(
 
 /// Builds the upstream Chat request, reverse tool shape and diagnostics once.
 ///
-/// Hosts that translate a Responses request should prefer this entry point over
+/// Callers that translate a Responses request should prefer this entry point over
 /// calling [`responses_to_chat_with_options`] and [`ToolShape::from_request`]
 /// separately.
+///
+/// # Errors
+///
+/// Same as [`responses_to_chat_with_options`].
 pub fn prepare_responses(
     request: &Value,
     want_stream: bool,
@@ -259,7 +293,7 @@ fn validate_declared_tools(declared: &DeclaredTools) -> Result<(), CompatError> 
             crate::ErrorKind::NameConflict,
             "tool_name_conflict",
             "invalid_request_error",
-            format!("tool name conflicts with the compatibility proxy: {conflict}"),
+            format!("tool name conflicts with a name reserved by openai-compat: {conflict}"),
         ));
     }
     Ok(())
@@ -282,6 +316,24 @@ fn invalid_input(message: impl Into<String>) -> CompatError {
         "invalid_request_error",
         message,
     )
+}
+
+/// Builds the upstream `stream_options`, asking for usage when the caller did
+/// not decide otherwise.
+///
+/// Responses clients always expect a `usage` object, while Chat only reports it
+/// for streaming responses when asked. Caller-supplied options are carried over
+/// untouched; only a missing or `null` `include_usage` is filled in, so an
+/// explicit choice is never overridden.
+fn stream_options(request: &Value) -> Value {
+    let mut options = match request.get("stream_options") {
+        Some(Value::Object(object)) => object.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if options.get("include_usage").is_none_or(Value::is_null) {
+        options.insert("include_usage".to_string(), Value::Bool(true));
+    }
+    Value::Object(options)
 }
 
 /// Whether this request asks for a compaction checkpoint.
@@ -473,6 +525,9 @@ fn sanitize_schema_name(name: &str) -> String {
 }
 
 /// Lists accepted-but-unsupported Responses features for compatibility logging.
+///
+/// These names describe features the client asked for that this crate cannot
+/// honour, so a caller can record the degradation.
 pub fn unsupported_feature_names(request: &Value) -> Vec<&'static str> {
     let mut features = Vec::new();
     if request.get("previous_response_id").is_some() {

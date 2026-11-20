@@ -1,15 +1,15 @@
 //! Chat Completions compatibility helpers.
 //!
-//! This module contains request preparation and stream aggregation. Hosts feed
-//! complete SSE data lines into [`ChatCompletionAccumulator`] and decide their
-//! own HTTP status, timeout and trace handling.
+//! This module contains request preparation and stream aggregation. Callers feed
+//! complete SSE data lines into [`ChatCompletionAccumulator`] and keep their own
+//! HTTP status, timeout and trace handling.
 
 use crate::{ChatError, CompatError, ErrorKind};
 use bytes::Bytes;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-/// Rule identifier used when hosts log role compatibility changes.
+/// Rule identifier callers can log when roles are normalized.
 pub const ROLE_RULE_ID: &str = "compat/developer-role";
 
 type ChatMutator<'a> = dyn FnMut(&mut Value) -> Result<bool, CompatError> + 'a;
@@ -29,14 +29,17 @@ pub struct PreparedChatRequest {
 }
 
 impl PreparedChatRequest {
+    /// Returns true when the original client asked for an SSE response.
     pub fn downstream_stream(&self) -> bool {
         self.downstream_stream
     }
 
+    /// Returns the model the client asked for, or an empty string.
     pub fn requested_model(&self) -> &str {
         &self.requested_model
     }
 
+    /// Returns true when the client body was a valid JSON object.
     pub fn valid_json_object(&self) -> bool {
         self.valid_json_object
     }
@@ -47,7 +50,7 @@ impl PreparedChatRequest {
 #[non_exhaustive]
 pub struct PreparedChat {
     request: PreparedChatRequest,
-    /// Parsed request for host-specific prompt policies.
+    /// Parsed request for caller-side prompt policies.
     value: Option<Value>,
     /// Whether the body differs from the original request bytes.
     body_changed: bool,
@@ -55,17 +58,21 @@ pub struct PreparedChat {
 }
 
 impl PreparedChat {
+    /// Returns the low-level request metadata.
     pub fn request(&self) -> &PreparedChatRequest {
         &self.request
     }
 
+    /// Returns the parsed request, or `None` when the body was not a JSON object.
     pub fn value(&self) -> Option<&Value> {
         self.value.as_ref()
     }
 
+    /// Returns true when the upstream body differs from the client bytes.
     pub fn body_changed(&self) -> bool {
         self.body_changed
     }
+
     /// Returns a replacement body when the library changed it.
     pub fn rewritten_body(&self) -> Option<Bytes> {
         self.request.body.clone()
@@ -93,11 +100,16 @@ pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
         .expect("preparing a request without a mutator cannot fail")
 }
 
-/// Prepares a Chat request while letting the host apply prompt policies.
+/// Prepares a Chat request while letting the caller apply prompt policies.
 ///
 /// The callback runs after parsing and after `stream:true` is inserted. The
 /// library then normalizes roles and encodes the final value, so the returned
 /// JSON and body cannot diverge.
+///
+/// # Errors
+///
+/// Returns the callback's [`CompatError`] unchanged when the caller rejects
+/// the request.
 pub fn prepare_chat_request_with<F>(
     bytes: &[u8],
     mut mutator: F,
@@ -164,6 +176,7 @@ fn prepare_chat_request_inner(
 
 /// Number of message roles normalized for Chat upstream compatibility.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RoleChanges {
     /// Messages changed from `developer` to `system`.
     pub developer_to_system: usize,
@@ -206,6 +219,15 @@ pub fn normalize_roles(value: &mut Value) -> RoleChanges {
 ///
 /// Invalid JSON or nested `stream` fields are returned unchanged. This mirrors
 /// prefix-preserving behavior used by compatibility gateways.
+///
+/// # Examples
+///
+/// ```
+/// use openai_compat::chat::force_top_level_stream_true;
+///
+/// let body = force_top_level_stream_true(br#"{"model":"m","stream":false}"#);
+/// assert_eq!(&body[..], br#"{"model":"m","stream":true}"#);
+/// ```
 pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
     let Some(object_start) = bytes.iter().position(|byte| !byte.is_ascii_whitespace()) else {
         return Bytes::copy_from_slice(bytes);
@@ -311,7 +333,12 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
     Bytes::copy_from_slice(bytes)
 }
 
-/// Re-encodes a value after a host-specific mutation.
+/// Re-encodes a value after a caller-side mutation.
+///
+/// # Panics
+///
+/// Panics only if `serde_json` cannot serialize a [`Value`], which cannot
+/// happen for a value built from the JSON data model.
 pub fn encode_chat(value: &Value) -> Bytes {
     Bytes::from(serde_json::to_vec(value).expect("JSON values serialize"))
 }
@@ -377,6 +404,14 @@ impl ChatCompletionAccumulator {
     }
 
     /// Consumes one SSE data payload, including `[DONE]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::LimitExceeded`] when the accumulated payload passes
+    /// the configured limit, [`ErrorKind::Upstream`] when the upstream reports
+    /// an error or sends a payload that is not JSON, and
+    /// [`ErrorKind::IncompleteStream`] is reported later by
+    /// [`ChatCompletionAccumulator::finish`] when the stream ends early.
     pub fn push_data(&mut self, payload: &str) -> Result<(), ChatError> {
         if self.max_bytes == 0 {
             return Err(CompatError::new(
@@ -412,10 +447,10 @@ impl ChatCompletionAccumulator {
         }
         let chunk: Value = serde_json::from_str(payload).map_err(|error| {
             CompatError::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::Upstream,
                 "upstream_server_error",
                 "upstream_error",
-                format!("无效 SSE JSON: {error}"),
+                format!("invalid SSE JSON from upstream: {error}"),
             )
         })?;
         if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
@@ -563,13 +598,20 @@ impl ChatCompletionAccumulator {
     }
 
     /// Builds the standard non-streaming Chat completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::IncompleteStream`] when the upstream stream ended
+    /// without a completion marker or without usable output, and
+    /// [`ErrorKind::Upstream`] when a tool call is missing its name or carries
+    /// arguments that are not a JSON object.
     pub fn finish(self, requested_model: &str) -> Result<Value, ChatError> {
         if !self.saw_done && !self.saw_finish {
             return Err(CompatError::new(
                 ErrorKind::IncompleteStream,
                 "incomplete_stream",
                 "upstream_error",
-                "上游 SSE 缺少完成分片或 [DONE]",
+                "upstream SSE ended without a finish chunk or [DONE]",
             ));
         }
         if self.choices.is_empty() {
@@ -577,7 +619,7 @@ impl ChatCompletionAccumulator {
                 ErrorKind::IncompleteStream,
                 "incomplete_stream",
                 "upstream_error",
-                "上游 SSE 已完成但没有有效输出",
+                "upstream SSE completed without usable output",
             ));
         }
         let choices = self
@@ -589,7 +631,7 @@ impl ChatCompletionAccumulator {
                         ErrorKind::IncompleteStream,
                         "incomplete_stream",
                         "upstream_error",
-                        format!("choice {index} 有输出但缺少 finish_reason"),
+                        format!("choice {index} produced output without a finish_reason"),
                     ));
                 }
                 let mut message = json!({
@@ -618,7 +660,7 @@ impl ChatCompletionAccumulator {
                                 ErrorKind::Upstream,
                                 "upstream_tool_call_dropped",
                                 "upstream_error",
-                                "tool call 缺少函数名",
+                                "upstream tool call is missing its function name",
                             ));
                         }
                         let arguments = if !tool.saw_arguments || tool.arguments.trim().is_empty() {
@@ -631,7 +673,7 @@ impl ChatCompletionAccumulator {
                                     ErrorKind::Upstream,
                                     "malformed_tool_call_arguments",
                                     "upstream_error",
-                                    "tool call 参数不是合法 JSON 对象",
+                                    "upstream tool call arguments are not a JSON object",
                                 ));
                             }
                             tool.arguments
@@ -656,7 +698,7 @@ impl ChatCompletionAccumulator {
                         ErrorKind::IncompleteStream,
                         "incomplete_stream",
                         "upstream_error",
-                        format!("choice {index} 以 tool_calls 结束但没有工具调用"),
+                        format!("choice {index} finished with tool_calls but sent no tool call"),
                     ));
                 }
                 if let Some(function_call) = choice.legacy_function_call {
@@ -686,6 +728,13 @@ impl ChatCompletionAccumulator {
 }
 
 /// Processes one complete SSE line.
+///
+/// Lines without a `data:` prefix, such as `event:` and blank lines, are
+/// ignored.
+///
+/// # Errors
+///
+/// Propagates any error from [`ChatCompletionAccumulator::push_data`].
 pub fn process_sse_line(acc: &mut ChatCompletionAccumulator, line: &[u8]) -> Result<(), ChatError> {
     let line = String::from_utf8_lossy(line);
     let Some(payload) = line.trim_end().strip_prefix("data:") else {
