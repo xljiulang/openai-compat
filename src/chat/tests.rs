@@ -75,6 +75,35 @@ fn preparation_reuses_bytes_when_roles_are_already_normalized() {
 }
 
 #[test]
+fn request_mutator_runs_before_final_encoding() {
+    let input =
+        br#"{"model":"model","stream":true,"messages":[{"role":"developer","content":"rules"}]}"#;
+    let prepared = prepare_chat_request_with(input, |value| {
+        value["messages"][0]["content"] = Value::String("rewritten rules".to_string());
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(prepared.role_changes().developer_to_system, 1);
+    assert!(prepared.body_changed());
+    let body: Value = serde_json::from_slice(&prepared.rewritten_body().unwrap()).unwrap();
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][0]["content"], "rewritten rules");
+}
+
+#[test]
+fn chat_accumulator_enforces_its_configured_limit() {
+    let mut accumulator = ChatCompletionAccumulator::new(16);
+    let error = accumulator
+        .push_data(r#"{"choices":[{"index":0}]}"#)
+        .unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::LimitExceeded);
+    assert!(error.message().contains("configured limit"));
+}
+
+#[test]
 fn aggregation_combines_text_reasoning_and_tools() {
     let mut accumulator = ChatCompletionAccumulator::default();
     process_sse_line(

@@ -123,6 +123,24 @@ fn prepared_responses_returns_one_consistent_tool_shape_and_diagnostics() {
     assert!(prepared.ignored().is_empty());
 }
 
+#[test]
+fn rejects_a_function_named_like_the_tool_search_proxy() {
+    let request = json!({
+        "model": "model",
+        "tools": [{
+            "type": "function",
+            "name": "openai_compat_tool_search",
+            "parameters": {"type": "object", "properties": {}}
+        }, {
+            "type": "tool_search"
+        }]
+    });
+
+    let error = prepare_responses(&request, true, TranslationOptions::default()).unwrap_err();
+
+    assert!(error.message().contains("conflicts"));
+}
+
 fn terminal_response(events: &[Bytes], event_name: &str) -> Value {
     for event in events {
         let event = std::str::from_utf8(event).unwrap();
@@ -728,7 +746,7 @@ fn non_stream_missing_finish_without_output_fails() {
 
     let error = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap_err();
 
-    assert!(error.contains("finish_reason"));
+    assert!(error.message().contains("finish_reason"));
 }
 
 #[test]

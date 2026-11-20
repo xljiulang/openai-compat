@@ -14,26 +14,91 @@
 pub mod chat;
 pub mod responses;
 
-/// Error produced by the Chat Completions compatibility path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatError {
-    pub code: String,
-    pub error_type: String,
-    pub message: String,
-    pub param: Option<String>,
+/// Default limit for a complete non-streaming response body.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Machine-readable category for a compatibility failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    InvalidInput,
+    Upstream,
+    IncompleteStream,
+    LimitExceeded,
+    NameConflict,
 }
 
-impl ChatError {
+/// Unified error produced by the compatibility crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CompatError {
+    kind: ErrorKind,
+    code: String,
+    error_type: String,
+    message: String,
+    param: Option<String>,
+    retryable: bool,
+}
+
+impl CompatError {
     pub fn new(
+        kind: ErrorKind,
         code: impl Into<String>,
         error_type: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
         Self {
+            kind,
             code: code.into(),
             error_type: error_type.into(),
             message: message.into(),
             param: None,
+            retryable: false,
         }
     }
+
+    pub fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.param = Some(param.into());
+        self
+    }
+
+    pub fn with_retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn error_type(&self) -> &str {
+        &self.error_type
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn param(&self) -> Option<&str> {
+        self.param.as_deref()
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.retryable
+    }
 }
+
+impl std::fmt::Display for CompatError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CompatError {}
+
+/// Backward-compatible alias for the previous Chat-specific error name.
+pub type ChatError = CompatError;

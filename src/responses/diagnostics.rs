@@ -28,10 +28,19 @@ pub fn ignored_feature_details_with_options(
     request: &Value,
     options: TranslationOptions,
 ) -> Vec<String> {
+    let declared = collect_declared_tools(request);
+    ignored_feature_details_from_declared(request, options, &declared)
+}
+
+pub(super) fn ignored_feature_details_from_declared(
+    request: &Value,
+    options: TranslationOptions,
+    declared: &DeclaredTools,
+) -> Vec<String> {
     let mut details = Vec::new();
     collect_input_items(request, &mut details, options);
     collect_content_parts(request, &mut details, options);
-    details.extend(collect_declared_tools(request).notes);
+    details.extend(declared.notes.iter().cloned());
     details.extend(text_format_kind(request).details());
     if is_compaction_turn(request) && request.get("tools").is_some() {
         details.push("tools.suppressed_by_compaction".to_string());

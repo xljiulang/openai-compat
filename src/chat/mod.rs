@@ -4,13 +4,15 @@
 //! complete SSE data lines into [`ChatCompletionAccumulator`] and decide their
 //! own HTTP status, timeout and trace handling.
 
-use crate::ChatError;
+use crate::{ChatError, CompatError, ErrorKind};
 use bytes::Bytes;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 /// Rule identifier used when hosts log role compatibility changes.
 pub const ROLE_RULE_ID: &str = "compat/developer-role";
+
+type ChatMutator<'a> = dyn FnMut(&mut Value) -> Result<(), CompatError> + 'a;
 
 /// Low-level Chat request metadata produced by request preparation.
 #[derive(Debug, Clone)]
@@ -61,22 +63,12 @@ impl PreparedChat {
         self.value.as_ref()
     }
 
-    pub fn value_mut(&mut self) -> Option<&mut Value> {
-        self.value.as_mut()
-    }
-
     pub fn body_changed(&self) -> bool {
         self.body_changed
     }
     /// Returns a replacement body when the library changed it.
     pub fn rewritten_body(&self) -> Option<Bytes> {
         self.request.body.clone()
-    }
-
-    /// Replaces the upstream body after a host-specific mutation.
-    pub fn set_body(&mut self, body: Bytes) {
-        self.request.body = Some(body);
-        self.body_changed = true;
     }
 
     /// Reports developer role conversions performed during preparation.
@@ -97,8 +89,31 @@ pub fn parse_chat_request(bytes: &[u8]) -> Option<Value> {
 /// Valid JSON objects are returned to the caller for host-specific mutations.
 /// Byte changes preserve every field except the top-level `stream` value.
 pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
+    prepare_chat_request_inner(bytes, None)
+        .expect("preparing a request without a mutator cannot fail")
+}
+
+/// Prepares a Chat request while letting the host apply prompt policies.
+///
+/// The callback runs after parsing and after `stream:true` is inserted. The
+/// library then normalizes roles and encodes the final value, so the returned
+/// JSON and body cannot diverge.
+pub fn prepare_chat_request_with<F>(
+    bytes: &[u8],
+    mut mutator: F,
+) -> Result<PreparedChat, CompatError>
+where
+    F: FnMut(&mut Value) -> Result<(), CompatError>,
+{
+    prepare_chat_request_inner(bytes, Some(&mut mutator))
+}
+
+fn prepare_chat_request_inner(
+    bytes: &[u8],
+    mutator: Option<&mut ChatMutator<'_>>,
+) -> Result<PreparedChat, CompatError> {
     let Ok(Value::Object(mut object)) = serde_json::from_slice::<Value>(bytes) else {
-        return PreparedChat {
+        return Ok(PreparedChat {
             request: PreparedChatRequest {
                 body: None,
                 downstream_stream: false,
@@ -108,7 +123,7 @@ pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
             value: None,
             body_changed: false,
             role_changes: RoleChanges::default(),
-        };
+        });
     };
     let downstream_stream = object
         .get("stream")
@@ -122,18 +137,15 @@ pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
     let stream_was_true = object.get("stream") == Some(&Value::Bool(true));
     object.insert("stream".to_string(), Value::Bool(true));
     let mut value = Value::Object(object);
+    if let Some(mutator) = mutator {
+        mutator(&mut value)?;
+    }
     let role_changes = normalize_roles(&mut value);
-    let role_changed = role_changes.developer_to_system > 0;
-    let body_changed = !stream_was_true || role_changed;
-    PreparedChat {
+    let body_changed = !stream_was_true || role_changes.changed();
+    let body = body_changed.then(|| encode_chat(&value));
+    Ok(PreparedChat {
         request: PreparedChatRequest {
-            body: (!stream_was_true || role_changed).then(|| {
-                if role_changed {
-                    encode_chat(&value)
-                } else {
-                    force_top_level_stream_true(bytes)
-                }
-            }),
+            body,
             downstream_stream,
             requested_model,
             valid_json_object: true,
@@ -141,7 +153,7 @@ pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
         value: Some(value),
         body_changed,
         role_changes,
-    }
+    })
 }
 
 /// Number of message roles normalized for Chat upstream compatibility.
@@ -319,7 +331,7 @@ struct AggregateChoice {
 }
 
 /// Incremental Chat SSE to complete Chat completion aggregator.
-#[derive(Default)]
+#[non_exhaustive]
 pub struct ChatCompletionAccumulator {
     id: Option<String>,
     created: Option<u64>,
@@ -330,17 +342,71 @@ pub struct ChatCompletionAccumulator {
     next_tool_key: usize,
     saw_done: bool,
     saw_finish: bool,
+    max_bytes: usize,
+    bytes_received: usize,
+}
+
+impl Default for ChatCompletionAccumulator {
+    fn default() -> Self {
+        Self::new(crate::DEFAULT_MAX_RESPONSE_BYTES)
+    }
 }
 
 impl ChatCompletionAccumulator {
+    /// Creates an accumulator with an explicit payload byte limit.
+    pub fn new(max_bytes: usize) -> Self {
+        Self {
+            id: None,
+            created: None,
+            model: None,
+            system_fingerprint: None,
+            usage: None,
+            choices: BTreeMap::new(),
+            next_tool_key: 0,
+            saw_done: false,
+            saw_finish: false,
+            max_bytes,
+            bytes_received: 0,
+        }
+    }
+
     /// Consumes one SSE data payload, including `[DONE]`.
     pub fn push_data(&mut self, payload: &str) -> Result<(), ChatError> {
+        if self.max_bytes == 0 {
+            return Err(CompatError::new(
+                ErrorKind::LimitExceeded,
+                "upstream_server_error",
+                "upstream_error",
+                "aggregated upstream response exceeds configured limit",
+            )
+            .with_retryable(true));
+        }
+        if payload.len() > self.max_bytes {
+            return Err(CompatError::new(
+                ErrorKind::LimitExceeded,
+                "upstream_server_error",
+                "upstream_error",
+                "aggregated upstream response exceeds configured limit",
+            )
+            .with_retryable(true));
+        }
+        self.bytes_received = self.bytes_received.saturating_add(payload.len());
+        if self.bytes_received > self.max_bytes {
+            return Err(CompatError::new(
+                ErrorKind::LimitExceeded,
+                "upstream_server_error",
+                "upstream_error",
+                "aggregated upstream response exceeds configured limit",
+            )
+            .with_retryable(true));
+        }
         if payload == "[DONE]" {
             self.saw_done = true;
             return Ok(());
         }
         let chunk: Value = serde_json::from_str(payload).map_err(|error| {
-            ChatError::new(
+            CompatError::new(
+                ErrorKind::InvalidInput,
                 "upstream_server_error",
                 "upstream_error",
                 format!("无效 SSE JSON: {error}"),
@@ -355,14 +421,18 @@ impl ChatCompletionAccumulator {
                 || chunk.get("message").is_some()
                 || (chunk.get("base_resp").is_some() && chunk.get("usage").is_none());
             if has_error_shape || !matches!(chunk, Value::Object(_)) {
-                return Err(ChatError {
-                    code: normalized
+                let mut error = CompatError::new(
+                    ErrorKind::Upstream,
+                    normalized
                         .code
                         .unwrap_or_else(|| "upstream_error".to_string()),
-                    error_type: normalized.error_type,
-                    message: normalized.message,
-                    param: normalized.param,
-                });
+                    normalized.error_type,
+                    normalized.message,
+                );
+                if let Some(param) = normalized.param {
+                    error = error.with_param(param);
+                }
+                return Err(error);
             }
         }
         if let Some(id) = chunk
@@ -489,14 +559,16 @@ impl ChatCompletionAccumulator {
     /// Builds the standard non-streaming Chat completion.
     pub fn finish(self, requested_model: &str) -> Result<Value, ChatError> {
         if !self.saw_done && !self.saw_finish {
-            return Err(ChatError::new(
+            return Err(CompatError::new(
+                ErrorKind::IncompleteStream,
                 "incomplete_stream",
                 "upstream_error",
                 "上游 SSE 缺少完成分片或 [DONE]",
             ));
         }
         if self.choices.is_empty() {
-            return Err(ChatError::new(
+            return Err(CompatError::new(
+                ErrorKind::IncompleteStream,
                 "incomplete_stream",
                 "upstream_error",
                 "上游 SSE 已完成但没有有效输出",
@@ -507,7 +579,8 @@ impl ChatCompletionAccumulator {
             .into_iter()
             .map(|(index, mut choice)| {
                 if choice.finish_reason.is_none() {
-                    return Err(ChatError::new(
+                    return Err(CompatError::new(
+                        ErrorKind::IncompleteStream,
                         "incomplete_stream",
                         "upstream_error",
                         format!("choice {index} 有输出但缺少 finish_reason"),
@@ -535,7 +608,8 @@ impl ChatCompletionAccumulator {
                     let mut calls = Vec::with_capacity(choice.tool_calls.len());
                     for tool in choice.tool_calls.into_values() {
                         if tool.name.is_empty() {
-                            return Err(ChatError::new(
+                            return Err(CompatError::new(
+                                ErrorKind::Upstream,
                                 "upstream_tool_call_dropped",
                                 "upstream_error",
                                 "tool call 缺少函数名",
@@ -547,7 +621,8 @@ impl ChatCompletionAccumulator {
                             if !serde_json::from_str::<Value>(&tool.arguments)
                                 .is_ok_and(|value| value.is_object())
                             {
-                                return Err(ChatError::new(
+                                return Err(CompatError::new(
+                                    ErrorKind::Upstream,
                                     "malformed_tool_call_arguments",
                                     "upstream_error",
                                     "tool call 参数不是合法 JSON 对象",
@@ -571,7 +646,8 @@ impl ChatCompletionAccumulator {
                     choice.finish_reason.as_deref(),
                     Some("tool_calls" | "function_call")
                 ) {
-                    return Err(ChatError::new(
+                    return Err(CompatError::new(
+                        ErrorKind::IncompleteStream,
                         "incomplete_stream",
                         "upstream_error",
                         format!("choice {index} 以 tool_calls 结束但没有工具调用"),
@@ -614,14 +690,18 @@ pub fn process_sse_line(acc: &mut ChatCompletionAccumulator, line: &[u8]) -> Res
 
 fn normalized_chat_error(value: &Value) -> ChatError {
     let normalized = crate::responses::normalize_chat_error(Some(value));
-    ChatError {
-        code: normalized
+    let mut error = ChatError::new(
+        ErrorKind::Upstream,
+        normalized
             .code
             .unwrap_or_else(|| "upstream_error".to_string()),
-        error_type: normalized.error_type,
-        message: normalized.message,
-        param: normalized.param,
+        normalized.error_type,
+        normalized.message,
+    );
+    if let Some(param) = normalized.param {
+        error = error.with_param(param);
     }
+    error
 }
 
 fn aggregate_tool_key(

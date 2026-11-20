@@ -1,4 +1,5 @@
 use super::*;
+use crate::CompatError;
 
 /// Schema name used when the client asks for structured output without naming it.
 const DEFAULT_SCHEMA_NAME: &str = "openai_compat_output_schema";
@@ -99,7 +100,7 @@ impl PreparedResponses {
 }
 
 /// Translates a Responses request into a Chat Completions request.
-pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, String> {
+pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, CompatError> {
     responses_to_chat_with_options(request, want_stream, TranslationOptions::default())
 }
 
@@ -107,8 +108,9 @@ pub fn responses_to_chat_with_options(
     request: &Value,
     want_stream: bool,
     options: TranslationOptions,
-) -> Result<Value, String> {
+) -> Result<Value, CompatError> {
     let declared = collect_declared_tools(request);
+    validate_declared_tools(&declared)?;
     let shape = ToolShape::from_declared(&declared.tools);
     responses_to_chat_with_parts(request, want_stream, options, &declared, &shape)
 }
@@ -119,9 +121,9 @@ fn responses_to_chat_with_parts(
     options: TranslationOptions,
     declared: &DeclaredTools,
     shape: &ToolShape,
-) -> Result<Value, String> {
+) -> Result<Value, CompatError> {
     if !request.is_object() {
-        return Err("request body must be a JSON object".to_string());
+        return Err(invalid_input("request body must be a JSON object"));
     }
     // A compaction turn is a summarization request: it must not be able to call
     // tools, so this decision gates the tool fields below.
@@ -234,12 +236,14 @@ pub fn prepare_responses(
     request: &Value,
     want_stream: bool,
     options: TranslationOptions,
-) -> Result<PreparedResponses, String> {
+) -> Result<PreparedResponses, CompatError> {
     let declared = collect_declared_tools(request);
+    validate_declared_tools(&declared)?;
     let shape = ToolShape::from_declared(&declared.tools);
     let chat = responses_to_chat_from_declared(request, want_stream, options, &declared, &shape)?;
-    let ignored =
-        crate::responses::diagnostics::ignored_feature_details_with_options(request, options);
+    let ignored = crate::responses::diagnostics::ignored_feature_details_from_declared(
+        request, options, &declared,
+    );
     let unsupported = unsupported_feature_names(request);
     Ok(PreparedResponses {
         chat,
@@ -249,14 +253,35 @@ pub fn prepare_responses(
     })
 }
 
+fn validate_declared_tools(declared: &DeclaredTools) -> Result<(), CompatError> {
+    if let Some(conflict) = declared.reserved_conflicts.first() {
+        return Err(CompatError::new(
+            crate::ErrorKind::NameConflict,
+            "tool_name_conflict",
+            "invalid_request_error",
+            format!("tool name conflicts with the compatibility proxy: {conflict}"),
+        ));
+    }
+    Ok(())
+}
+
 fn responses_to_chat_from_declared(
     request: &Value,
     want_stream: bool,
     options: TranslationOptions,
     declared: &DeclaredTools,
     shape: &ToolShape,
-) -> Result<Value, String> {
+) -> Result<Value, CompatError> {
     responses_to_chat_with_parts(request, want_stream, options, declared, shape)
+}
+
+fn invalid_input(message: impl Into<String>) -> CompatError {
+    CompatError::new(
+        crate::ErrorKind::InvalidInput,
+        "invalid_request",
+        "invalid_request_error",
+        message,
+    )
 }
 
 /// Whether this request asks for a compaction checkpoint.

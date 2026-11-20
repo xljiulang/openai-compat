@@ -24,6 +24,8 @@ pub(super) struct DeclaredTools {
     pub(super) tools: Vec<Value>,
     /// Name collisions and unrecognized carriers, surfaced by diagnostics.
     pub(super) notes: Vec<String>,
+    /// Names that collide with a synthetic tool injected by this crate.
+    pub(super) reserved_conflicts: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,12 +99,12 @@ fn absorb_tools(
                         note_unnamed_tool(child, declared);
                         continue;
                     };
-                    if admit(
-                        &flat_namespace_name(namespace, name),
-                        source,
-                        seen,
-                        declared,
-                    ) {
+                    let flat = flat_namespace_name(namespace, name);
+                    if flat == TOOL_SEARCH_PROXY_NAME {
+                        declared.reserved_conflicts.push(flat);
+                        continue;
+                    }
+                    if admit(&flat, source, seen, declared) {
                         kept.push(child.clone());
                     }
                 }
@@ -123,6 +125,10 @@ fn absorb_tools(
                     note_unnamed_tool(tool, declared);
                     continue;
                 };
+                if name == TOOL_SEARCH_PROXY_NAME {
+                    declared.reserved_conflicts.push(name.to_string());
+                    continue;
+                }
                 if admit(name, source, seen, declared) {
                     declared.tools.push(tool.clone());
                 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::CompatError;
 
 /// Optional host-specific cleanup applied to assistant text.
 ///
@@ -6,7 +7,11 @@ use super::*;
 pub type ResponseCleaner = fn(&str) -> String;
 
 /// Translates a non-streaming Chat completion into a Responses object.
-pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result<Value, String> {
+pub fn chat_to_responses(
+    chat: &Value,
+    model: &str,
+    shape: &ToolShape,
+) -> Result<Value, CompatError> {
     chat_to_responses_with_cleaner(chat, model, shape, None)
 }
 
@@ -16,7 +21,7 @@ pub fn chat_to_responses_with_cleaner(
     model: &str,
     shape: &ToolShape,
     cleaner: Option<ResponseCleaner>,
-) -> Result<Value, String> {
+) -> Result<Value, CompatError> {
     let chat_id = chat
         .get("id")
         .and_then(Value::as_str)
@@ -120,7 +125,12 @@ pub fn chat_to_responses_with_cleaner(
         Some("content_filter" | "sensitive") => Some("content_filter"),
         None if !output.is_empty() => Some("max_output_tokens"),
         None => {
-            return Err("upstream Chat completion has neither output nor finish_reason".to_string())
+            return Err(CompatError::new(
+                crate::ErrorKind::Upstream,
+                "upstream_server_error",
+                "server_error",
+                "upstream Chat completion has neither output nor finish_reason",
+            ));
         }
         _ => None,
     };
@@ -205,7 +215,7 @@ fn translate_legacy_function_call(function_call: &Value) -> Option<Value> {
     }))
 }
 
-pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Value, String> {
+pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Value, CompatError> {
     let call_id = call
         .get("id")
         .and_then(Value::as_str)
@@ -250,8 +260,11 @@ pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Val
         arguments.to_string()
     };
     if !serde_json::from_str::<Value>(&arguments).is_ok_and(|value| value.is_object()) {
-        return Err(format!(
-            "tool call arguments for {name} are not a JSON object"
+        return Err(CompatError::new(
+            crate::ErrorKind::Upstream,
+            "malformed_tool_call_arguments",
+            "server_error",
+            format!("tool call arguments for {name} are not a JSON object"),
         ));
     }
     let mut item = json!({
