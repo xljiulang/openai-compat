@@ -150,9 +150,7 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
                             value_start += 1;
                         }
                         let mut value_end = value_start;
-                        while value_end < bytes.len()
-                            && !matches!(bytes[value_end], b',' | b'}')
-                        {
+                        while value_end < bytes.len() && !matches!(bytes[value_end], b',' | b'}') {
                             value_end += 1;
                         }
                         while value_end > value_start && bytes[value_end - 1].is_ascii_whitespace()
@@ -518,10 +516,7 @@ impl ChatCompletionAccumulator {
 }
 
 /// Processes one complete SSE line.
-pub fn process_sse_line(
-    acc: &mut ChatCompletionAccumulator,
-    line: &[u8],
-) -> Result<(), ChatError> {
+pub fn process_sse_line(acc: &mut ChatCompletionAccumulator, line: &[u8]) -> Result<(), ChatError> {
     let line = String::from_utf8_lossy(line);
     let Some(payload) = line.trim_end().strip_prefix("data:") else {
         return Ok(());
