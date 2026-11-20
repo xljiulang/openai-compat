@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: lint, test and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Check formatting
+        run: cargo +stable fmt --all -- --check
+
+      - name: Clippy (deny warnings and pedantic lints)
+        run: cargo +stable clippy --all-targets -- -D warnings -D clippy::pedantic
+
+      - name: Test
+        run: cargo +stable test
+
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: "-D missing_docs"
+        run: cargo +stable doc --no-deps
+
+  test-windows:
+    name: test on windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Test
+        run: cargo +stable test
+
+  msrv:
+    name: minimum supported rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.82 --profile minimal
+
+      - name: Check against rust-version
+        run: cargo +1.82 check --all-targets
