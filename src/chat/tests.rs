@@ -5,14 +5,13 @@ fn preparation_forces_upstream_stream_and_keeps_client_intent() {
     let input = br#"{"model":"deepseek-v4","stream":false}"#;
     let prepared = prepare_chat_request(input);
     let value = prepared
-        .value
-        .as_ref()
+        .value()
         .expect("valid JSON object should be parsed");
 
     assert_eq!(value["stream"], true);
-    assert!(!prepared.request.downstream_stream);
-    assert_eq!(prepared.request.requested_model, "deepseek-v4");
-    assert!(prepared.body_changed);
+    assert!(!prepared.request().downstream_stream());
+    assert_eq!(prepared.request().requested_model(), "deepseek-v4");
+    assert!(prepared.body_changed());
     let body: Value = serde_json::from_slice(&prepared.rewritten_body().unwrap()).unwrap();
     assert_eq!(body["stream"], true);
 }
@@ -21,37 +20,37 @@ fn preparation_forces_upstream_stream_and_keeps_client_intent() {
 fn preparation_defaults_missing_stream_to_non_streaming() {
     let input = br#"{"model":"model"}"#;
     let prepared = prepare_chat_request(input);
-    let value = prepared.value.as_ref().unwrap();
+    let value = prepared.value().unwrap();
 
     assert_eq!(value["stream"], true);
-    assert!(!prepared.request.downstream_stream);
-    assert!(prepared.body_changed);
+    assert!(!prepared.request().downstream_stream());
+    assert!(prepared.body_changed());
 }
 
 #[test]
 fn preparation_preserves_original_streaming_intent_and_non_json_body() {
     let input = br#"{"model":"model","stream":true}"#;
     let prepared = prepare_chat_request(input);
-    assert_eq!(prepared.value.as_ref().unwrap()["stream"], true);
-    assert!(prepared.request.downstream_stream);
-    assert!(!prepared.body_changed);
+    assert_eq!(prepared.value().unwrap()["stream"], true);
+    assert!(prepared.request().downstream_stream());
+    assert!(!prepared.body_changed());
 
     let prepared = prepare_chat_request(b"not json");
-    assert!(!prepared.request.valid_json_object);
-    assert!(!prepared.request.downstream_stream);
+    assert!(!prepared.request().valid_json_object());
+    assert!(!prepared.request().downstream_stream());
     assert!(prepared.rewritten_body().is_none());
-    assert!(prepared.value.is_none());
-    assert!(!prepared.body_changed);
+    assert!(prepared.value().is_none());
+    assert!(!prepared.body_changed());
 }
 
 #[test]
 fn preparation_normalizes_developer_roles_by_default() {
     let input = br#"{"model":"model","stream":true,"messages":[{"role":"developer","content":"rules"},{"role":"DEVELOPER","content":"more"},{"role":"user","content":"hello"},{"role":"assistant","content":"ok"},{"role":"tool","content":"result"}]}"#;
     let prepared = prepare_chat_request(input);
-    let value = prepared.value.as_ref().unwrap();
+    let value = prepared.value().unwrap();
 
     assert_eq!(prepared.role_changes().developer_to_system, 2);
-    assert!(prepared.body_changed);
+    assert!(prepared.body_changed());
     assert_eq!(value["messages"][0]["role"], "system");
     assert_eq!(value["messages"][1]["role"], "system");
     assert_eq!(value["messages"][0]["content"], "rules");
@@ -71,7 +70,7 @@ fn preparation_reuses_bytes_when_roles_are_already_normalized() {
     let prepared = prepare_chat_request(input);
 
     assert_eq!(prepared.role_changes(), RoleChanges::default());
-    assert!(!prepared.body_changed);
+    assert!(!prepared.body_changed());
     assert!(prepared.rewritten_body().is_none());
 }
 

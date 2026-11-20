@@ -3,6 +3,13 @@
 //! The crate owns JSON/SSE protocol conversion only. HTTP routing, retries,
 //! authentication, tracing and product-specific prompt policies remain in the
 //! host application.
+//!
+//! Start with [`chat::prepare_chat_request`] for Chat compatibility,
+//! [`responses::prepare_responses`] for Responses translation, and
+//! [`chat::ChatCompletionAccumulator`] for non-streaming Chat aggregation.
+//!
+//! Public structs that may evolve are non-exhaustive; use accessors where
+//! available.
 
 pub mod chat;
 pub mod responses;

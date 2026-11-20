@@ -9,35 +9,65 @@ use bytes::Bytes;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-/// Maximum size of a complete Chat response for non-streaming clients.
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// Rule identifier used when hosts log role compatibility changes.
 pub const ROLE_RULE_ID: &str = "compat/developer-role";
 
-/// Chat request after compatibility preparation.
+/// Low-level Chat request metadata produced by request preparation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PreparedChatRequest {
     /// Replacement body. `None` means the original request bytes are reused.
     pub(crate) body: Option<Bytes>,
     /// Whether the original client requested SSE.
-    pub downstream_stream: bool,
+    downstream_stream: bool,
     /// Model requested by the client.
-    pub requested_model: String,
+    requested_model: String,
     /// Whether the original body was a valid JSON object.
-    pub valid_json_object: bool,
+    valid_json_object: bool,
 }
 
-/// Prepared Chat request plus the parsed value and byte-rewrite state.
+impl PreparedChatRequest {
+    pub fn downstream_stream(&self) -> bool {
+        self.downstream_stream
+    }
+
+    pub fn requested_model(&self) -> &str {
+        &self.requested_model
+    }
+
+    pub fn valid_json_object(&self) -> bool {
+        self.valid_json_object
+    }
+}
+
+/// Prepared Chat request. Use the accessors rather than depending on fields.
+#[derive(Debug)]
+#[non_exhaustive]
 pub struct PreparedChat {
-    pub request: PreparedChatRequest,
+    request: PreparedChatRequest,
     /// Parsed request for host-specific prompt policies.
-    pub value: Option<Value>,
+    value: Option<Value>,
     /// Whether the body differs from the original request bytes.
-    pub body_changed: bool,
+    body_changed: bool,
     role_changes: RoleChanges,
 }
 
 impl PreparedChat {
+    pub fn request(&self) -> &PreparedChatRequest {
+        &self.request
+    }
+
+    pub fn value(&self) -> Option<&Value> {
+        self.value.as_ref()
+    }
+
+    pub fn value_mut(&mut self) -> Option<&mut Value> {
+        self.value.as_mut()
+    }
+
+    pub fn body_changed(&self) -> bool {
+        self.body_changed
+    }
     /// Returns a replacement body when the library changed it.
     pub fn rewritten_body(&self) -> Option<Bytes> {
         self.request.body.clone()

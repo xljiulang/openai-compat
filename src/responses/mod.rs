@@ -20,8 +20,8 @@ mod tools;
 
 pub use diagnostics::{ignored_feature_details, ignored_feature_details_with_options};
 pub use request::{
-    responses_to_chat, responses_to_chat_with_options, unsupported_feature_names,
-    TranslationOptions,
+    prepare_responses, responses_to_chat, responses_to_chat_with_options,
+    unsupported_feature_names, PreparedResponses, TranslationOptions,
 };
 pub use response::{
     chat_to_responses, chat_to_responses_with_cleaner, usage_to_responses, ResponseCleaner,

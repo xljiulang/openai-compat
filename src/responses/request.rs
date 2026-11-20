@@ -1,7 +1,7 @@
 use super::*;
 
 /// Schema name used when the client asks for structured output without naming it.
-const DEFAULT_SCHEMA_NAME: &str = "codex_output_schema";
+const DEFAULT_SCHEMA_NAME: &str = "openai_compat_output_schema";
 
 /// Chat Completions rejects `response_format.json_schema.name` over 64 bytes.
 const MAX_SCHEMA_NAME_BYTES: usize = 64;
@@ -44,9 +44,58 @@ pub(super) const DEGRADED_INPUT_TYPES: [&str; 7] = [
 ];
 
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct TranslationOptions {
-    pub supports_file_input: bool,
-    pub supports_audio_input: bool,
+    supports_file_input: bool,
+    supports_audio_input: bool,
+}
+
+impl TranslationOptions {
+    /// Declares which media inputs the target model accepts.
+    pub fn new(supports_file_input: bool, supports_audio_input: bool) -> Self {
+        Self {
+            supports_file_input,
+            supports_audio_input,
+        }
+    }
+
+    pub fn supports_file_input(self) -> bool {
+        self.supports_file_input
+    }
+
+    pub fn supports_audio_input(self) -> bool {
+        self.supports_audio_input
+    }
+}
+
+/// A fully prepared Responses request.
+///
+/// The upstream Chat body, reverse tool mapping, diagnostics and unsupported
+/// feature list all come from the same parse and tool collection.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PreparedResponses {
+    pub chat: Value,
+    pub shape: ToolShape,
+    pub ignored: Vec<String>,
+    pub unsupported: Vec<&'static str>,
+}
+
+impl PreparedResponses {
+    /// Returns the reverse tool mapping required by response translation.
+    pub fn shape(&self) -> &ToolShape {
+        &self.shape
+    }
+
+    /// Returns accepted Responses features that could not be carried upstream.
+    pub fn ignored(&self) -> &[String] {
+        &self.ignored
+    }
+
+    /// Returns accepted but unsupported Responses feature names.
+    pub fn unsupported(&self) -> &[&'static str] {
+        &self.unsupported
+    }
 }
 
 /// Translates a Responses request into a Chat Completions request.
@@ -58,6 +107,18 @@ pub fn responses_to_chat_with_options(
     request: &Value,
     want_stream: bool,
     options: TranslationOptions,
+) -> Result<Value, String> {
+    let declared = collect_declared_tools(request);
+    let shape = ToolShape::from_declared(&declared.tools);
+    responses_to_chat_with_parts(request, want_stream, options, &declared, &shape)
+}
+
+fn responses_to_chat_with_parts(
+    request: &Value,
+    want_stream: bool,
+    options: TranslationOptions,
+    declared: &DeclaredTools,
+    shape: &ToolShape,
 ) -> Result<Value, String> {
     if !request.is_object() {
         return Err("request body must be a JSON object".to_string());
@@ -101,8 +162,6 @@ pub fn responses_to_chat_with_options(
         "messages": messages,
         "stream": want_stream
     });
-    let declared = collect_declared_tools(request);
-    let shape = ToolShape::from_declared(&declared.tools);
     if !declared.tools.is_empty() {
         let translated = translate_tools(&declared.tools);
         if !translated.is_empty() {
@@ -145,7 +204,7 @@ pub fn responses_to_chat_with_options(
         }
     }
     if !compaction {
-        if let Some(choice) = translate_tool_choice(request.get("tool_choice"), &shape) {
+        if let Some(choice) = translate_tool_choice(request.get("tool_choice"), shape) {
             chat["tool_choice"] = choice;
         }
         if let Some(format) = translate_text_format(request) {
@@ -164,6 +223,40 @@ pub fn responses_to_chat_with_options(
     }
     let _ = crate::chat::normalize_roles(&mut chat);
     Ok(chat)
+}
+
+/// Builds the upstream Chat request, reverse tool shape and diagnostics once.
+///
+/// Hosts that translate a Responses request should prefer this entry point over
+/// calling [`responses_to_chat_with_options`] and [`ToolShape::from_request`]
+/// separately.
+pub fn prepare_responses(
+    request: &Value,
+    want_stream: bool,
+    options: TranslationOptions,
+) -> Result<PreparedResponses, String> {
+    let declared = collect_declared_tools(request);
+    let shape = ToolShape::from_declared(&declared.tools);
+    let chat = responses_to_chat_from_declared(request, want_stream, options, &declared, &shape)?;
+    let ignored =
+        crate::responses::diagnostics::ignored_feature_details_with_options(request, options);
+    let unsupported = unsupported_feature_names(request);
+    Ok(PreparedResponses {
+        chat,
+        shape,
+        ignored,
+        unsupported,
+    })
+}
+
+fn responses_to_chat_from_declared(
+    request: &Value,
+    want_stream: bool,
+    options: TranslationOptions,
+    declared: &DeclaredTools,
+    shape: &ToolShape,
+) -> Result<Value, String> {
+    responses_to_chat_with_parts(request, want_stream, options, declared, shape)
 }
 
 /// Whether this request asks for a compaction checkpoint.

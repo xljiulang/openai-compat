@@ -1,9 +1,10 @@
 use super::*;
 
 const CHAT_TOOL_NAME_MAX_BYTES: usize = 64;
-pub(super) const TOOL_SEARCH_PROXY_NAME: &str = "_cyarp_tool_search";
+pub(super) const TOOL_SEARCH_PROXY_NAME: &str = "openai_compat_tool_search";
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct ToolShape {
     namespaces: HashMap<String, (String, String)>,
     declared: HashSet<String>,
@@ -294,7 +295,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
                         "type": "function",
                         "function": {
                             "name": TOOL_SEARCH_PROXY_NAME,
-                            "description": "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.",
+                            "description": "Search and load tools, plugins, connectors, and MCP namespaces for the current task.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {

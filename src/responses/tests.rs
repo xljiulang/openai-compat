@@ -93,6 +93,36 @@ fn translated_chat_never_contains_developer_roles() {
     assert_eq!(messages[0]["content"], "root\n\nrules");
 }
 
+#[test]
+fn prepared_responses_returns_one_consistent_tool_shape_and_diagnostics() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "message",
+            "role": "developer",
+            "content": "rules"
+        }],
+        "tools": [{
+            "type": "namespace",
+            "name": "ns",
+            "tools": [{ "type": "function", "name": "run" }]
+        }, {
+            "type": "tool_search"
+        }]
+    });
+    let prepared = prepare_responses(&request, true, TranslationOptions::default()).unwrap();
+
+    assert_eq!(prepared.chat["stream"], true);
+    assert_eq!(prepared.chat["tools"][0]["function"]["name"], "ns__run");
+    assert_eq!(
+        prepared.chat["tools"][1]["function"]["name"],
+        "openai_compat_tool_search"
+    );
+    assert!(prepared.shape().resolve("ns__run").0 == "run");
+    assert!(prepared.unsupported().is_empty());
+    assert!(prepared.ignored().is_empty());
+}
+
 fn terminal_response(events: &[Bytes], event_name: &str) -> Value {
     for event in events {
         let event = std::str::from_utf8(event).unwrap();
@@ -368,15 +398,8 @@ fn maps_supported_file_and_audio_parts() {
         }]
     });
 
-    let chat = responses_to_chat_with_options(
-        &request,
-        false,
-        TranslationOptions {
-            supports_file_input: true,
-            supports_audio_input: true,
-        },
-    )
-    .unwrap();
+    let chat = responses_to_chat_with_options(&request, false, TranslationOptions::new(true, true))
+        .unwrap();
     let content = chat["messages"][0]["content"].as_array().unwrap();
     assert_eq!(content[0]["type"], "file");
     assert_eq!(content[0]["file"]["filename"], "report.pdf");
@@ -399,15 +422,9 @@ fn maps_top_level_input_file_item() {
         }]
     });
 
-    let chat = responses_to_chat_with_options(
-        &request,
-        false,
-        TranslationOptions {
-            supports_file_input: true,
-            supports_audio_input: false,
-        },
-    )
-    .unwrap();
+    let chat =
+        responses_to_chat_with_options(&request, false, TranslationOptions::new(true, false))
+            .unwrap();
 
     assert_eq!(chat["messages"][0]["role"], "user");
     assert_eq!(chat["messages"][0]["content"][0]["type"], "file");
@@ -2448,15 +2465,9 @@ fn moves_supported_tool_output_file_to_following_user_message() {
         ]
     });
 
-    let chat = responses_to_chat_with_options(
-        &request,
-        false,
-        TranslationOptions {
-            supports_file_input: true,
-            supports_audio_input: false,
-        },
-    )
-    .unwrap();
+    let chat =
+        responses_to_chat_with_options(&request, false, TranslationOptions::new(true, false))
+            .unwrap();
     let messages = chat["messages"].as_array().unwrap();
 
     assert_eq!(roles(messages), ["assistant", "tool", "user"]);
@@ -3498,7 +3509,7 @@ fn translates_text_format_json_schema() {
         "input": "hi",
         "text": { "format": {
             "type": "json_schema",
-            "name": "codex_output_schema",
+            "name": "openai_compat_output_schema",
             "strict": true,
             "schema": {
                 "type": "object",
@@ -3511,7 +3522,7 @@ fn translates_text_format_json_schema() {
     let format = &chat["response_format"];
 
     assert_eq!(format["type"], "json_schema");
-    assert_eq!(format["json_schema"]["name"], "codex_output_schema");
+    assert_eq!(format["json_schema"]["name"], "openai_compat_output_schema");
     assert_eq!(format["json_schema"]["strict"], true);
     assert_eq!(
         format["json_schema"]["schema"]["properties"]["answer"]["type"],
@@ -4082,14 +4093,17 @@ fn maps_tool_search_declaration_and_choice_to_proxy_function() {
 
     let chat = responses_to_chat(&request, false).unwrap();
 
-    assert_eq!(chat["tools"][0]["function"]["name"], "_cyarp_tool_search");
+    assert_eq!(
+        chat["tools"][0]["function"]["name"],
+        "openai_compat_tool_search"
+    );
     assert_eq!(
         chat["tools"][0]["function"]["parameters"]["required"][0],
         "query"
     );
     assert_eq!(
         chat["tool_choice"]["function"]["name"],
-        "_cyarp_tool_search"
+        "openai_compat_tool_search"
     );
 }
 
@@ -4108,7 +4122,7 @@ fn restores_tool_search_call_in_streaming_and_non_streaming_responses() {
                     "id": "call_search",
                     "type": "function",
                     "function": {
-                        "name": "_cyarp_tool_search",
+                        "name": "openai_compat_tool_search",
                         "arguments": "{\"query\":\"mail\",\"limit\":10}"
                     }
                 }]
@@ -4130,7 +4144,7 @@ fn restores_tool_search_call_in_streaming_and_non_streaming_responses() {
                     "index": 0,
                     "id": "call_search",
                     "function": {
-                        "name": "_cyarp_tool_search",
+                        "name": "openai_compat_tool_search",
                         "arguments": "{\"query\":\"mail\"}"
                     }
                 }]
@@ -4178,7 +4192,7 @@ fn converts_paired_tool_search_history_to_function_call_and_tool_result() {
     assert_eq!(roles(messages), ["assistant", "tool"]);
     assert_eq!(
         messages[0]["tool_calls"][0]["function"]["name"],
-        "_cyarp_tool_search"
+        "openai_compat_tool_search"
     );
     assert_eq!(
         messages[0]["tool_calls"][0]["function"]["arguments"],

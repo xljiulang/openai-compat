@@ -54,9 +54,9 @@ fn collect_input_items(request: &Value, details: &mut Vec<String>, options: Tran
             Some(name) => {
                 if !is_handled_input_type(name) {
                     details.push(format!("input.item:{name}"));
-                } else if name == "input_file" && !options.supports_file_input {
+                } else if name == "input_file" && !options.supports_file_input() {
                     details.push("input.item_degraded:input_file_unsupported".to_string());
-                } else if name == "input_audio" && !options.supports_audio_input {
+                } else if name == "input_audio" && !options.supports_audio_input() {
                     details.push("input.item_degraded:input_audio_unsupported".to_string());
                 } else if super::request::DEGRADED_INPUT_TYPES.contains(&name) {
                     details.push(format!("input.item_degraded:{name}"));
@@ -83,10 +83,10 @@ fn collect_content_parts(request: &Value, details: &mut Vec<String>, options: Tr
                 continue;
             }
             match part.get("type").and_then(Value::as_str) {
-                Some("input_file") if !options.supports_file_input => {
+                Some("input_file") if !options.supports_file_input() => {
                     details.push("content.part:input_file_unsupported".to_string())
                 }
-                Some("input_audio") if !options.supports_audio_input => {
+                Some("input_audio") if !options.supports_audio_input() => {
                     details.push("content.part:input_audio_unsupported".to_string())
                 }
                 Some(name) if HANDLED_CONTENT_PARTS.contains(&name) => {}
