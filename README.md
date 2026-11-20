@@ -182,11 +182,16 @@ minor 版本。
 
 ## 开发
 
+CI 使用固定版本的 lint 工具链（见 `.github/workflows/ci.yml` 的 `CI_TOOLCHAIN`），
+因为 clippy 每版都会新增 lint，浮动 `stable` 会让构建无故变红。本地工具链可能与
+CI 不同：本地通过不代表 CI 通过，提交前请留意 CI 结论。升级 `CI_TOOLCHAIN`
+时需同时处理新版引入的 lint。
+
 ```powershell
 cargo test
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets -- -D warnings -D clippy::pedantic
 cargo fmt --all -- --check
-cargo doc --no-deps
+$env:RUSTDOCFLAGS='-D missing_docs'; cargo doc --no-deps
 ```
 
 ## 许可证

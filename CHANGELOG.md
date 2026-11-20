@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Streaming Responses translation no longer accumulates output without bound.
 - Several internal `#[must_use]`, documentation and clone-efficiency lints were
   cleared; `clippy::pedantic` now passes with warnings denied.
+- Empty-result assertions in the test suite now use `assert_eq!`, which reports
+  the actual value on failure and satisfies the newer `assert_is_empty` lint.
+
+### CI
+
+- The lint toolchain is pinned via `CI_TOOLCHAIN` instead of tracking floating
+  `stable`, so a newly released clippy lint cannot fail the build on its own.
 
 ## [0.1.0] - 2026-11-20
 
