@@ -140,7 +140,15 @@ fn prepare_chat_request_inner(
     let host_changed = mutator.map_or(Ok(false), |mutator| mutator(&mut value))?;
     let role_changes = normalize_roles(&mut value);
     let body_changed = !stream_was_true || role_changes.changed() || host_changed;
-    let body = body_changed.then(|| encode_chat(&value));
+    let body = if body_changed {
+        if host_changed || role_changes.changed() {
+            Some(encode_chat(&value))
+        } else {
+            Some(force_top_level_stream_true(bytes))
+        }
+    } else {
+        None
+    };
     Ok(PreparedChat {
         request: PreparedChatRequest {
             body,
