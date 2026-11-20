@@ -27,20 +27,25 @@ openai-compat = { git = "https://github.com/xljiulang/openai-compat.git", rev = 
 ## Chat request preparation
 
 ```rust
-use openai_compat::chat::prepare_chat_request;
+use openai_compat::chat::prepare_chat_request_with;
 
 let input = br#"{"model":"model","stream":false,"messages":[{"role":"developer","content":"rules"}]}"#;
-let prepared = prepare_chat_request(input);
+let prepared = prepare_chat_request_with(input, |chat| {
+    // Host-specific prompt/brand policy belongs here.
+    chat["metadata"] = serde_json::json!({"host": "policy-applied"});
+    Ok(())
+})?;
 let upstream = prepared
     .rewritten_body()
-    .unwrap_or_else(|| bytes::Bytes::copy_from_slice(input));
+    .expect("the callback changed the request");
 assert!(!prepared.request().downstream_stream());
 assert_eq!(prepared.role_changes().developer_to_system, 1);
 ```
 
-`prepare_chat_request` returns the parsed value for host-specific prompt
-policies. Call `set_body` after mutating it. The original bytes are reused when
-neither streaming nor roles require a rewrite.
+`prepare_chat_request_with` runs the host policy callback, then applies role
+normalization and encodes the final value. `PreparedChat` is read-only, so JSON
+and upstream bytes cannot diverge. The original bytes are reused when neither
+streaming, roles nor the callback require a rewrite.
 
 ## Chat stream aggregation
 
@@ -52,6 +57,7 @@ use openai_compat::chat::{
 };
 
 let mut acc = ChatCompletionAccumulator::default();
+// Or: ChatCompletionAccumulator::new(64 * 1024 * 1024)
 process_sse_line(&mut acc, br#"data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}"#)?;
 process_sse_line(&mut acc, b"data: [DONE]")?;
 let completion = acc.finish("model")?;
@@ -78,6 +84,9 @@ Use `prepare_responses` rather than separately calling `responses_to_chat` and
 `ToolShape::from_request`; it performs tool collection once and returns the
 request, reverse mapping and diagnostics together.
 
+The reserved synthetic tool name is `openai_compat_tool_search`. An input
+function with the same name is rejected rather than silently overwritten.
+
 For non-streaming responses, pass the upstream Chat JSON and prepared tool shape
 to `chat_to_responses`. For streaming responses, feed Chat chunks to
 `ResponsesStream`. The output is SSE bytes ready for the host to forward.
@@ -91,8 +100,9 @@ and other request gates remain in the host.
 
 ## Stability
 
-The crate is pre-1.0. Public structs that may gain fields are `non_exhaustive`.
-Prefer accessors over fields. Breaking API changes increment the minor version.
+The crate is pre-1.0. Public structs and errors that may gain fields or variants
+are `non_exhaustive`. Prefer accessors over fields. Breaking API changes
+increment the minor version.
 The host pins a Git revision and upgrades deliberately.
 
 ## Not included
