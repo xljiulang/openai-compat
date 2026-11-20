@@ -1,4 +1,4 @@
-use super::*;
+use super::{json, HashMap, HashSet, Value};
 
 const CHAT_TOOL_NAME_MAX_BYTES: usize = 64;
 pub(super) const TOOL_SEARCH_PROXY_NAME: &str = "openai_compat_tool_search";
@@ -171,6 +171,7 @@ fn admit(
 
 impl ToolShape {
     /// Builds the request-local tool shape from Responses declarations.
+    #[must_use]
     pub fn from_request(request: &Value) -> Self {
         Self::from_declared(&collect_declared_tools(request).tools)
     }
@@ -464,7 +465,7 @@ pub(super) fn custom_tool_description(tool: &Value, name: &str) -> String {
          free-form payload in another object or add JSON escaping inside the string."
             .to_string(),
     );
-    sections.push(format!("Original tool definition:\n```json\n{}\n```", tool));
+    sections.push(format!("Original tool definition:\n```json\n{tool}\n```"));
     sections.join("\n\n")
 }
 
@@ -552,6 +553,5 @@ pub(super) fn normalize_arguments(raw: &str) -> (String, bool) {
         return ("{}".to_string(), false);
     }
     super::canonical::canonicalize_object_arguments(raw)
-        .map(|arguments| (arguments, false))
-        .unwrap_or_else(|| ("{}".to_string(), true))
+        .map_or_else(|| ("{}".to_string(), true), |arguments| (arguments, false))
 }

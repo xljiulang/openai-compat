@@ -1,4 +1,4 @@
-use super::*;
+use super::{gen_id, json, reasoning_text, unix_now, ToolShape, Value};
 use crate::CompatError;
 use std::sync::Arc;
 
@@ -29,6 +29,11 @@ pub fn chat_to_responses(
 /// # Errors
 ///
 /// Same as [`chat_to_responses`].
+// The translation order is the response contract: reasoning first, then text,
+// then tool calls. Keeping it linear makes each emitted item auditable.
+#[allow(clippy::too_many_lines)]
+// The cleaner is owned so callers can pass a temporary `Arc` without binding it.
+#[allow(clippy::needless_pass_by_value)]
 pub fn chat_to_responses_with_cleaner(
     chat: &Value,
     model: &str,
@@ -178,9 +183,7 @@ pub fn chat_to_responses_with_cleaner(
 }
 
 fn clean_text(cleaner: Option<&ResponseCleaner>, text: &str) -> String {
-    cleaner
-        .map(|cleaner| cleaner.as_ref()(text))
-        .unwrap_or_else(|| text.to_string())
+    cleaner.map_or_else(|| text.to_string(), |cleaner| cleaner.as_ref()(text))
 }
 
 fn push_output_text(parts: &mut Vec<Value>, text: &str) {
@@ -194,9 +197,10 @@ fn push_output_text(parts: &mut Vec<Value>, text: &str) {
 }
 
 fn split_leading_think_block(text: &str) -> (Option<String>, String) {
-    super::inline_think::split_leading_think_block(text)
-        .map(|(reasoning, answer)| ((!reasoning.trim().is_empty()).then_some(reasoning), answer))
-        .unwrap_or_else(|| (None, text.to_string()))
+    super::inline_think::split_leading_think_block(text).map_or_else(
+        || (None, text.to_string()),
+        |(reasoning, answer)| ((!reasoning.trim().is_empty()).then_some(reasoning), answer),
+    )
 }
 
 fn translate_legacy_function_call(function_call: &Value) -> Option<Value> {
@@ -224,8 +228,7 @@ fn translate_legacy_function_call(function_call: &Value) -> Option<Value> {
             .get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| gen_id("call")),
+            .map_or_else(|| gen_id("call"), str::to_string),
         "name": name,
         "arguments": arguments
     }))

@@ -127,7 +127,7 @@ fn prepared_responses_returns_one_consistent_tool_shape_and_diagnostics() {
         prepared.chat()["tools"][1]["function"]["name"],
         "openai_compat_tool_search"
     );
-    assert!(prepared.shape().resolve("ns__run").0 == "run");
+    assert_eq!(prepared.shape().resolve("ns__run").0, "run");
     assert!(prepared.unsupported().is_empty());
     assert!(prepared.ignored().is_empty());
 }

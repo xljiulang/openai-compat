@@ -1,9 +1,7 @@
 //! Responses API to Chat Completions compatibility translation.
 
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, HashSet};
 
 const MISSING_TOOL_OUTPUT: &str =
     "Tool output was missing from conversation history and has been replaced by openai-compat.";
@@ -32,11 +30,14 @@ pub use tools::ToolShape;
 pub use error::{normalize_chat_error, normalize_chat_error_text, ChatErrorInfo};
 pub use stream::reasoning_text;
 
-use inline_think::*;
-use media::*;
-use response::*;
-use stream::*;
-use tools::*;
+use inline_think::InlineThinkSplitter;
+use media::{extract_tool_output_media, flush_tool_media};
+use response::custom_tool_input;
+use stream::{gen_id, unix_now};
+use tools::{
+    collect_declared_tools, declared_tool_names, flat_namespace_name, normalize_arguments,
+    translate_tool_choice, translate_tools, DeclaredTools,
+};
 
 #[cfg(test)]
 mod tests;

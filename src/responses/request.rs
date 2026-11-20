@@ -1,5 +1,10 @@
-use super::*;
+use super::{
+    collect_declared_tools, declared_tool_names, extract_tool_output_media, flat_namespace_name,
+    flush_tool_media, json, translate_tool_choice, translate_tools, DeclaredTools, HashSet,
+    ToolShape, Value, MISSING_TOOL_OUTPUT,
+};
 use crate::CompatError;
+use std::collections::HashMap;
 
 /// Schema name used when the client asks for structured output without naming it.
 const DEFAULT_SCHEMA_NAME: &str = "openai_compat_output_schema";
@@ -57,6 +62,7 @@ pub struct TranslationOptions {
 
 impl TranslationOptions {
     /// Declares which media inputs the target model accepts.
+    #[must_use]
     pub fn new(supports_file_input: bool, supports_audio_input: bool) -> Self {
         Self {
             supports_file_input,
@@ -65,11 +71,13 @@ impl TranslationOptions {
     }
 
     /// Returns whether file inputs are forwarded to the target model.
+    #[must_use]
     pub fn supports_file_input(self) -> bool {
         self.supports_file_input
     }
 
     /// Returns whether audio inputs are forwarded to the target model.
+    #[must_use]
     pub fn supports_audio_input(self) -> bool {
         self.supports_audio_input
     }
@@ -90,26 +98,31 @@ pub struct PreparedResponses {
 
 impl PreparedResponses {
     /// Returns the upstream Chat Completions body.
+    #[must_use]
     pub fn chat(&self) -> &Value {
         &self.chat
     }
 
     /// Consumes the prepared request and returns the upstream Chat body.
+    #[must_use]
     pub fn into_chat(self) -> Value {
         self.chat
     }
 
     /// Returns the reverse tool mapping required by response translation.
+    #[must_use]
     pub fn shape(&self) -> &ToolShape {
         &self.shape
     }
 
     /// Returns accepted Responses features that could not be carried upstream.
+    #[must_use]
     pub fn ignored(&self) -> &[String] {
         &self.ignored
     }
 
     /// Returns accepted but unsupported Responses feature names.
+    #[must_use]
     pub fn unsupported(&self) -> &[&'static str] {
         &self.unsupported
     }
@@ -182,7 +195,7 @@ fn responses_to_chat_with_parts(
     }
     preserve_invalid_tool_calls_as_text(&mut messages);
     dedupe_function_call_arguments(&mut messages);
-    messages = collapse_system_messages_to_head(messages);
+    messages = collapse_system_messages_to_head(&messages);
     drop_empty_user_messages(&mut messages);
     repair_tool_pairing(&mut messages);
 
@@ -243,11 +256,11 @@ fn responses_to_chat_with_parts(
             chat["response_format"] = format;
         }
     }
-    if !chat
+    let has_tools = chat
         .get("tools")
         .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty())
-    {
+        .is_some_and(|tools| !tools.is_empty());
+    if !has_tools {
         if let Some(object) = chat.as_object_mut() {
             object.remove("tool_choice");
             object.remove("parallel_tool_calls");
@@ -528,6 +541,7 @@ fn sanitize_schema_name(name: &str) -> String {
 ///
 /// These names describe features the client asked for that this crate cannot
 /// honour, so a caller can record the degradation.
+#[must_use]
 pub fn unsupported_feature_names(request: &Value) -> Vec<&'static str> {
     let mut features = Vec::new();
     if request.get("previous_response_id").is_some() {
@@ -572,6 +586,10 @@ pub(super) fn is_handled_input_type(name: &str) -> bool {
     HANDLED_INPUT_TYPES.contains(&name)
 }
 
+// A single table-driven state machine over the Responses input item types. The
+// shared `pending`/`media`/`known_call_ids` bookkeeping is what keeps tool turns
+// correctly ordered, so it stays in one place rather than in per-type helpers.
+#[allow(clippy::too_many_lines)]
 pub(super) fn translate_input_items(
     items: &[Value],
     messages: &mut Vec<Value>,
@@ -637,9 +655,6 @@ pub(super) fn translate_input_items(
             Some("reasoning") => {
                 let text = reasoning_item_text(item);
                 append_reasoning(&mut reasoning, text.clone());
-                if text.is_none() {
-                    continue;
-                }
             }
             Some("function_call" | "custom_tool_call" | "tool_search_call") => {
                 // Media from the preceding tool turn belongs before this new
@@ -653,16 +668,20 @@ pub(super) fn translate_input_items(
                         .get("namespace")
                         .and_then(Value::as_str)
                         .filter(|namespace| !namespace.is_empty())
-                        .map(|namespace| flat_namespace_name(namespace, raw_name))
-                        .unwrap_or_else(|| raw_name.to_string())
+                        .map_or_else(
+                            || raw_name.to_string(),
+                            |namespace| flat_namespace_name(namespace, raw_name),
+                        )
                 };
                 let call_id = object
                     .get("call_id")
                     .or_else(|| object.get("id"))
                     .and_then(Value::as_str)
                     .filter(|call_id| !call_id.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("call_local_{}", known_call_ids.len() + 1));
+                    .map_or_else(
+                        || format!("call_local_{}", known_call_ids.len() + 1),
+                        str::to_string,
+                    );
                 known_call_ids.insert(call_id.clone());
                 let arguments = if item_type == Some("custom_tool_call") {
                     json!({
@@ -675,8 +694,7 @@ pub(super) fn translate_input_items(
                 } else if item_type == Some("tool_search_call") {
                     object
                         .get("arguments")
-                        .map(super::canonical::canonical_json_string)
-                        .unwrap_or_else(|| "{}".to_string())
+                        .map_or_else(|| "{}".to_string(), super::canonical::canonical_json_string)
                 } else {
                     let arguments = object
                         .get("arguments")
@@ -755,11 +773,6 @@ pub(super) fn translate_input_items(
                     "content": content
                 }));
             }
-            Some("additional_tools") => {
-                // The declared tools were lifted by `collect_declared_tools`.
-                // The carrier carries a role but no content, so letting it fall
-                // through to the message arm would emit an empty system message.
-            }
             Some("input_text" | "input_image" | "input_file" | "input_audio") => {
                 flush_pending(messages, &mut pending);
                 flush_tool_media(messages, &mut media);
@@ -782,7 +795,7 @@ pub(super) fn translate_input_items(
                 let call_id = object.get("call_id").and_then(Value::as_str).unwrap_or("");
                 if !call_id.is_empty() && known_call_ids.contains(call_id) {
                     flush_pending(messages, &mut pending);
-                    let output = object.get("output").map(value_to_text).unwrap_or(text);
+                    let output = object.get("output").map_or(text, value_to_text);
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call_id,
@@ -794,6 +807,9 @@ pub(super) fn translate_input_items(
                     orphan_outputs.push(orphan);
                 }
             }
+            // `additional_tools` carriers were lifted by `collect_declared_tools`.
+            // They carry a role but no content, so falling through here avoids
+            // emitting an empty system message.
             _ => {}
         }
     }
@@ -840,8 +856,7 @@ fn preserve_invalid_tool_calls_as_text(messages: &mut Vec<Value>) {
                         .unwrap_or("<unknown>");
                     let arguments = call
                         .pointer("/function/arguments")
-                        .map(value_to_text)
-                        .unwrap_or_else(|| "<missing>".to_string());
+                        .map_or_else(|| "<missing>".to_string(), value_to_text);
                     notes.push(format!(
                         "[Historical tool call with invalid arguments; context only, not a new tool invocation]\nname: {name}\ncall_id: {}\narguments: {arguments}",
                         id.unwrap_or("<missing>")
@@ -1067,7 +1082,7 @@ fn append_message_text(message: &mut Value, text: &str) {
     }
 }
 
-fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
+fn collapse_system_messages_to_head(messages: &[Value]) -> Vec<Value> {
     let mut head = Vec::new();
     let mut rest = Vec::with_capacity(messages.len());
     let mut seen_non_system = false;

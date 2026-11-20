@@ -30,16 +30,19 @@ pub struct PreparedChatRequest {
 
 impl PreparedChatRequest {
     /// Returns true when the original client asked for an SSE response.
+    #[must_use]
     pub fn downstream_stream(&self) -> bool {
         self.downstream_stream
     }
 
     /// Returns the model the client asked for, or an empty string.
+    #[must_use]
     pub fn requested_model(&self) -> &str {
         &self.requested_model
     }
 
     /// Returns true when the client body was a valid JSON object.
+    #[must_use]
     pub fn valid_json_object(&self) -> bool {
         self.valid_json_object
     }
@@ -59,32 +62,38 @@ pub struct PreparedChat {
 
 impl PreparedChat {
     /// Returns the low-level request metadata.
+    #[must_use]
     pub fn request(&self) -> &PreparedChatRequest {
         &self.request
     }
 
     /// Returns the parsed request, or `None` when the body was not a JSON object.
+    #[must_use]
     pub fn value(&self) -> Option<&Value> {
         self.value.as_ref()
     }
 
     /// Returns true when the upstream body differs from the client bytes.
+    #[must_use]
     pub fn body_changed(&self) -> bool {
         self.body_changed
     }
 
     /// Returns a replacement body when the library changed it.
+    #[must_use]
     pub fn rewritten_body(&self) -> Option<Bytes> {
         self.request.body.clone()
     }
 
     /// Reports developer role conversions performed during preparation.
+    #[must_use]
     pub fn role_changes(&self) -> RoleChanges {
         self.role_changes
     }
 }
 
 /// Parses a valid Chat JSON object (not an array) without rewriting it.
+#[must_use]
 pub fn parse_chat_request(bytes: &[u8]) -> Option<Value> {
     serde_json::from_slice::<Value>(bytes)
         .ok()
@@ -93,8 +102,14 @@ pub fn parse_chat_request(bytes: &[u8]) -> Option<Value> {
 
 /// Parses a Chat request and forces `stream:true` for the upstream.
 ///
-/// Valid JSON objects are returned to the caller for host-specific mutations.
+/// Valid JSON objects are returned to the caller for caller-side mutations.
 /// Byte changes preserve every field except the top-level `stream` value.
+///
+/// # Panics
+///
+/// Panics only if the internal preparation step reports an error, which cannot
+/// happen because no mutator is supplied.
+#[must_use]
 pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
     prepare_chat_request_inner(bytes, None)
         .expect("preparing a request without a mutator cannot fail")
@@ -149,11 +164,11 @@ fn prepare_chat_request_inner(
     let stream_was_true = object.get("stream") == Some(&Value::Bool(true));
     object.insert("stream".to_string(), Value::Bool(true));
     let mut value = Value::Object(object);
-    let host_changed = mutator.map_or(Ok(false), |mutator| mutator(&mut value))?;
+    let caller_changed = mutator.map_or(Ok(false), |mutator| mutator(&mut value))?;
     let role_changes = normalize_roles(&mut value);
-    let body_changed = !stream_was_true || role_changes.changed() || host_changed;
+    let body_changed = !stream_was_true || role_changes.changed() || caller_changed;
     let body = if body_changed {
-        if host_changed || role_changes.changed() {
+        if caller_changed || role_changes.changed() {
             Some(encode_chat(&value))
         } else {
             Some(force_top_level_stream_true(bytes))
@@ -184,6 +199,7 @@ pub struct RoleChanges {
 
 impl RoleChanges {
     /// Returns true when at least one role was changed.
+    #[must_use]
     pub fn changed(self) -> bool {
         self.developer_to_system > 0
     }
@@ -228,6 +244,10 @@ pub fn normalize_roles(value: &mut Value) -> RoleChanges {
 /// let body = force_top_level_stream_true(br#"{"model":"m","stream":false}"#);
 /// assert_eq!(&body[..], br#"{"model":"m","stream":true}"#);
 /// ```
+// Long but linear byte scanner; splitting it would separate the string-escape
+// bookkeeping from the depth tracking that keeps it correct.
+#[allow(clippy::too_many_lines)]
+#[must_use]
 pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
     let Some(object_start) = bytes.iter().position(|byte| !byte.is_ascii_whitespace()) else {
         return Bytes::copy_from_slice(bytes);
@@ -285,18 +305,14 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
                         {
                             value_end -= 1;
                         }
-                        return match &bytes[value_start..value_end] {
-                            b"true" => Bytes::copy_from_slice(bytes),
-                            b"false" => {
-                                let mut replaced =
-                                    Vec::with_capacity(bytes.len().saturating_sub(4));
-                                replaced.extend_from_slice(&bytes[..value_start]);
-                                replaced.extend_from_slice(b"true");
-                                replaced.extend_from_slice(&bytes[value_end..]);
-                                Bytes::from(replaced)
-                            }
-                            _ => Bytes::copy_from_slice(bytes),
-                        };
+                        if &bytes[value_start..value_end] == b"false" {
+                            let mut replaced = Vec::with_capacity(bytes.len().saturating_sub(4));
+                            replaced.extend_from_slice(&bytes[..value_start]);
+                            replaced.extend_from_slice(b"true");
+                            replaced.extend_from_slice(&bytes[value_end..]);
+                            return Bytes::from(replaced);
+                        }
+                        return Bytes::copy_from_slice(bytes);
                     }
                 }
                 in_string = true;
@@ -323,7 +339,7 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
             .copied();
         let mut inserted = Vec::with_capacity(bytes.len() + 15);
         inserted.extend_from_slice(&bytes[..closing]);
-        if !matches!(previous, Some(b'{') | Some(b',')) {
+        if !matches!(previous, Some(b'{' | b',')) {
             inserted.push(b',');
         }
         inserted.extend_from_slice(b"\"stream\":true");
@@ -339,6 +355,7 @@ pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
 ///
 /// Panics only if `serde_json` cannot serialize a [`Value`], which cannot
 /// happen for a value built from the JSON data model.
+#[must_use]
 pub fn encode_chat(value: &Value) -> Bytes {
     Bytes::from(serde_json::to_vec(value).expect("JSON values serialize"))
 }
@@ -387,6 +404,7 @@ impl Default for ChatCompletionAccumulator {
 
 impl ChatCompletionAccumulator {
     /// Creates an accumulator with an explicit payload byte limit.
+    #[must_use]
     pub fn new(max_bytes: usize) -> Self {
         Self {
             id: None,
@@ -412,6 +430,9 @@ impl ChatCompletionAccumulator {
     /// an error or sends a payload that is not JSON, and
     /// [`ErrorKind::IncompleteStream`] is reported later by
     /// [`ChatCompletionAccumulator::finish`] when the stream ends early.
+    // Long but linear chunk decoder; splitting the per-field extraction would
+    // scatter the aggregate state updates that must stay atomic per chunk.
+    #[allow(clippy::too_many_lines)]
     pub fn push_data(&mut self, payload: &str) -> Result<(), ChatError> {
         if self.max_bytes == 0 {
             return Err(CompatError::new(
@@ -508,7 +529,11 @@ impl ChatCompletionAccumulator {
             .into_iter()
             .flatten()
         {
-            let index = choice.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let index = choice
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .unwrap_or(0);
             let state = self.choices.entry(index).or_default();
             let delta = choice
                 .get("delta")
@@ -593,6 +618,7 @@ impl ChatCompletionAccumulator {
     }
 
     /// Returns true after a `[DONE]` marker was observed.
+    #[must_use]
     pub fn saw_done(&self) -> bool {
         self.saw_done
     }
@@ -605,6 +631,9 @@ impl ChatCompletionAccumulator {
     /// without a completion marker or without usable output, and
     /// [`ErrorKind::Upstream`] when a tool call is missing its name or carries
     /// arguments that are not a JSON object.
+    // The validation order is part of the error contract; keeping it linear makes
+    // each rejection reason visible in one place.
+    #[allow(clippy::too_many_lines)]
     pub fn finish(self, requested_model: &str) -> Result<Value, ChatError> {
         if !self.saw_done && !self.saw_finish {
             return Err(CompatError::new(
@@ -801,15 +830,13 @@ fn aggregate_tool_key(
 fn now_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn now_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis())
 }
 
 #[cfg(test)]

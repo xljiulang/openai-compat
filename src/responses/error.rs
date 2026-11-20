@@ -22,6 +22,7 @@ pub struct ChatErrorInfo {
 ///
 /// `None` produces a placeholder describing an empty error response, so callers
 /// never have to synthesize a message themselves.
+#[must_use]
 pub fn normalize_chat_error(value: Option<&Value>) -> ChatErrorInfo {
     let Some(value) = value else {
         return ChatErrorInfo {
@@ -75,11 +76,10 @@ pub fn normalize_chat_error(value: Option<&Value>) -> ChatErrorInfo {
 /// Normalizes an upstream Chat error from raw response text.
 ///
 /// Text that is not JSON is kept verbatim as the message.
+#[must_use]
 pub fn normalize_chat_error_text(text: &str) -> ChatErrorInfo {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .map(|value| normalize_chat_error(Some(&value)))
-        .unwrap_or_else(|| ChatErrorInfo {
+    serde_json::from_str::<Value>(text).ok().map_or_else(
+        || ChatErrorInfo {
             message: if text.is_empty() {
                 "Upstream returned an empty error response".to_string()
             } else {
@@ -88,7 +88,9 @@ pub fn normalize_chat_error_text(text: &str) -> ChatErrorInfo {
             error_type: "upstream_error".to_string(),
             code: None,
             param: None,
-        })
+        },
+        |value| normalize_chat_error(Some(&value)),
+    )
 }
 
 fn value_to_code(value: &Value) -> String {

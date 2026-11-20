@@ -2,11 +2,11 @@
 //!
 //! `responses_to_chat` is a pure function with no logger, so a request can lose
 //! items, content parts or whole tool declarations without anything appearing
-//! in the log. A caller can inspect [`PreparedResponses::ignored`] or call
+//! in the log. A caller can inspect [`super::PreparedResponses::ignored`] or call
 //! [`ignored_feature_details`] once per request to record that degradation.
 
 use super::request::{is_compaction_turn, is_handled_input_type, text_format_kind};
-use super::*;
+use super::{collect_declared_tools, DeclaredTools, TranslationOptions, Value};
 
 /// Content part types `message_content` carries into the Chat message.
 const HANDLED_CONTENT_PARTS: [&str; 6] = [
@@ -20,11 +20,13 @@ const HANDLED_CONTENT_PARTS: [&str; 6] = [
 
 /// Lists, in a stable order, everything the translation layer accepted but
 /// could not carry into the Chat request.
+#[must_use]
 pub fn ignored_feature_details(request: &Value) -> Vec<String> {
     ignored_feature_details_with_options(request, TranslationOptions::default())
 }
 
 /// Lists dropped features while honouring the caller's media capabilities.
+#[must_use]
 pub fn ignored_feature_details_with_options(
     request: &Value,
     options: TranslationOptions,
@@ -94,10 +96,10 @@ fn collect_content_parts(request: &Value, details: &mut Vec<String>, options: Tr
             }
             match part.get("type").and_then(Value::as_str) {
                 Some("input_file") if !options.supports_file_input() => {
-                    details.push("content.part:input_file_unsupported".to_string())
+                    details.push("content.part:input_file_unsupported".to_string());
                 }
                 Some("input_audio") if !options.supports_audio_input() => {
-                    details.push("content.part:input_audio_unsupported".to_string())
+                    details.push("content.part:input_audio_unsupported".to_string());
                 }
                 Some(name) if HANDLED_CONTENT_PARTS.contains(&name) => {}
                 Some(name) => details.push(format!("content.part:{name}")),

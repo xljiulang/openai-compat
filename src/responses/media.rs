@@ -8,7 +8,7 @@
 //! ends.
 
 use super::request::value_to_text;
-use super::*;
+use super::{json, TranslationOptions, Value};
 
 /// Placeholder replacing an image that was moved out of a tool result.
 pub(super) const TOOL_MEDIA_MOVED: &str =
@@ -72,7 +72,7 @@ fn strip_media(
         Value::String(text) => strip_media_string(&text, parts, depth, options),
         Value::Array(mut items) => {
             let mut extracted = 0;
-            for item in items.iter_mut() {
+            for item in &mut items {
                 extracted += strip_media(item, parts, depth + 1, options);
             }
             (Value::Array(items), extracted)

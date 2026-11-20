@@ -1,11 +1,15 @@
-use super::*;
+use super::{
+    custom_tool_input, json, normalize_arguments, normalize_chat_error, usage_to_responses,
+    InlineThinkSplitter, ResponseCleaner, ToolShape, Value,
+};
 use bytes::Bytes;
+use std::collections::BTreeMap;
 use std::io::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn clean_text(cleaner: Option<&ResponseCleaner>, text: &str) -> String {
-    cleaner
-        .map(|cleaner| cleaner.as_ref()(text))
-        .unwrap_or_else(|| text.to_string())
+    cleaner.map_or_else(|| text.to_string(), |cleaner| cleaner.as_ref()(text))
 }
 
 #[derive(Clone)]
@@ -67,16 +71,19 @@ pub struct ResponsesStream {
 
 impl ResponsesStream {
     /// Creates a translator for one downstream Responses request.
+    #[must_use]
     pub fn new(response_id: String, model: String) -> Self {
         Self::with_shape(response_id, model, ToolShape::default())
     }
 
     /// Creates a translator with request-local tool metadata.
+    #[must_use]
     pub fn with_shape(response_id: String, model: String, shape: ToolShape) -> Self {
         Self::with_shape_and_cleaner(response_id, model, shape, None)
     }
 
     /// Creates a translator with a caller-supplied assistant text cleaner.
+    #[must_use]
     pub fn with_shape_and_cleaner(
         response_id: String,
         model: String,
@@ -226,6 +233,14 @@ impl ResponsesStream {
     }
 
     /// Emits terminal events exactly once.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal call key disappears between lookups, which
+    /// cannot happen because the key came from the same map.
+    // The terminal path must emit reasoning, text and tool-call closures in a
+    // fixed order before the final event, which makes it one linear sequence.
+    #[allow(clippy::too_many_lines)]
     pub fn finish(&mut self) -> Vec<Bytes> {
         if self.finished {
             return Vec::new();
@@ -237,11 +252,9 @@ impl ResponsesStream {
         events.extend(self.finish_text());
         events.extend(self.flush_ready_calls());
         for key in self.calls.keys().copied().collect::<Vec<_>>() {
-            let (added, missing_name) = self
-                .calls
-                .get(&key)
-                .map(|call| (call.added, call.display_name.is_empty()))
-                .unwrap_or((true, true));
+            let (added, missing_name) = self.calls.get(&key).map_or((true, true), |call| {
+                (call.added, call.display_name.is_empty())
+            });
             if added || missing_name {
                 continue;
             }
@@ -662,6 +675,9 @@ impl ResponsesStream {
         }
     }
 
+    // Each branch closes one tool-call kind and shares the completion bookkeeping,
+    // so the branches stay side by side for parity.
+    #[allow(clippy::too_many_lines)]
     fn finish_calls(
         &mut self,
         calls: impl IntoIterator<Item = CallTrack>,
@@ -921,12 +937,12 @@ impl ResponsesStream {
             return Vec::new();
         };
         state.added = true;
-        state.display_name = display_name.clone();
-        state.namespace = namespace.clone();
+        state.display_name.clone_from(&display_name);
+        state.namespace.clone_from(&namespace);
         state.custom = custom;
         state.tool_search = tool_search;
         state.output_index = output_index;
-        state.item_id = item_id.clone();
+        state.item_id.clone_from(&item_id);
 
         let item = if custom {
             json!({
@@ -1062,8 +1078,8 @@ impl ResponsesStream {
 
 /// Extracts reasoning text from a Chat delta or message.
 ///
-/// Upstreams disagree on the field: `reasoning_content` (DeepSeek, Kimi),
-/// `reasoning` (OpenRouter) or `reasoning_details[].text` (aggregated
+/// Upstreams disagree on the field: `reasoning_content` (`DeepSeek`, `Kimi`),
+/// `reasoning` (`OpenRouter`) or `reasoning_details[].text` (aggregated
 /// providers). Both the streaming translator and the non-streaming aggregator
 /// use this so the two paths cannot drift apart.
 pub fn reasoning_text(delta: &Value) -> Option<String> {
@@ -1146,6 +1162,9 @@ fn reasoning_detail_text(detail: &Value) -> Option<String> {
     None
 }
 
+// Taking the payload by value keeps the ~30 `sse_event(.., json!(..))` call sites
+// free of `&`, and the value is serialized immediately afterwards.
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn sse_event(name: &str, data: Value) -> Bytes {
     let mut event = Vec::with_capacity(96);
     write!(event, "event: {name}\ndata: ").expect("writing to Vec cannot fail");
@@ -1157,8 +1176,7 @@ pub(super) fn sse_event(name: &str, data: Value) -> Bytes {
 pub(super) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 pub(super) fn gen_id(prefix: &str) -> String {

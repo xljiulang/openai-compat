@@ -1,8 +1,8 @@
-//! OpenAI Responses and Chat Completions protocol compatibility translation.
+//! `OpenAI` Responses and Chat Completions protocol compatibility translation.
 //!
-//! This crate does one thing: translate between the OpenAI Responses API and
+//! This crate does one thing: translate between the `OpenAI` Responses API and
 //! Chat Completions. It listens on no port, performs no authentication, routing,
-//! retries or logging, and assumes no particular host application.
+//! retries or logging, and assumes no particular caller.
 //!
 //! The supported direction is a Responses client talking to a Chat Completions
 //! upstream. Requests are translated forward with [`responses::prepare_responses`],
@@ -114,7 +114,7 @@ pub enum ErrorKind {
 
 /// Unified error produced by the compatibility crate.
 ///
-/// The fields mirror the OpenAI error body so a host can forward them to the
+/// The fields mirror the `OpenAI` error body so a caller can forward them to the
 /// client with minimal reshaping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -146,43 +146,51 @@ impl CompatError {
     }
 
     /// Records the request parameter the failure points at.
+    #[must_use]
     pub fn with_param(mut self, param: impl Into<String>) -> Self {
         self.param = Some(param.into());
         self
     }
 
     /// Marks whether retrying the same request may succeed.
+    #[must_use]
     pub fn with_retryable(mut self, retryable: bool) -> Self {
         self.retryable = retryable;
         self
     }
 
     /// Returns the failure category.
+    #[must_use]
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
 
     /// Returns the machine-readable error code.
+    #[must_use]
     pub fn code(&self) -> &str {
         &self.code
     }
 
     /// Returns the OpenAI-style error type.
+    #[must_use]
     pub fn error_type(&self) -> &str {
         &self.error_type
     }
 
     /// Returns the human-readable message.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 
     /// Returns the request parameter this failure points at, when known.
+    #[must_use]
     pub fn param(&self) -> Option<&str> {
         self.param.as_deref()
     }
 
     /// Reports whether retrying the same request may succeed.
+    #[must_use]
     pub fn retryable(&self) -> bool {
         self.retryable
     }
