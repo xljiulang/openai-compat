@@ -80,7 +80,7 @@ fn request_mutator_runs_before_final_encoding() {
         br#"{"model":"model","stream":true,"messages":[{"role":"developer","content":"rules"}]}"#;
     let prepared = prepare_chat_request_with(input, |value| {
         value["messages"][0]["content"] = Value::String("rewritten rules".to_string());
-        Ok(())
+        Ok(true)
     })
     .unwrap();
 

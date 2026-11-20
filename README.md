@@ -33,7 +33,7 @@ let input = br#"{"model":"model","stream":false,"messages":[{"role":"developer",
 let prepared = prepare_chat_request_with(input, |chat| {
     // Host-specific prompt/brand policy belongs here.
     chat["metadata"] = serde_json::json!({"host": "policy-applied"});
-    Ok(())
+    Ok(true)
 })?;
 let upstream = prepared
     .rewritten_body()

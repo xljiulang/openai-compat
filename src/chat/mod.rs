@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 /// Rule identifier used when hosts log role compatibility changes.
 pub const ROLE_RULE_ID: &str = "compat/developer-role";
 
-type ChatMutator<'a> = dyn FnMut(&mut Value) -> Result<(), CompatError> + 'a;
+type ChatMutator<'a> = dyn FnMut(&mut Value) -> Result<bool, CompatError> + 'a;
 
 /// Low-level Chat request metadata produced by request preparation.
 #[derive(Debug, Clone)]
@@ -103,7 +103,7 @@ pub fn prepare_chat_request_with<F>(
     mut mutator: F,
 ) -> Result<PreparedChat, CompatError>
 where
-    F: FnMut(&mut Value) -> Result<(), CompatError>,
+    F: FnMut(&mut Value) -> Result<bool, CompatError>,
 {
     prepare_chat_request_inner(bytes, Some(&mut mutator))
 }
@@ -137,11 +137,9 @@ fn prepare_chat_request_inner(
     let stream_was_true = object.get("stream") == Some(&Value::Bool(true));
     object.insert("stream".to_string(), Value::Bool(true));
     let mut value = Value::Object(object);
-    if let Some(mutator) = mutator {
-        mutator(&mut value)?;
-    }
+    let host_changed = mutator.map_or(Ok(false), |mutator| mutator(&mut value))?;
     let role_changes = normalize_roles(&mut value);
-    let body_changed = !stream_was_true || role_changes.changed();
+    let body_changed = !stream_was_true || role_changes.changed() || host_changed;
     let body = body_changed.then(|| encode_chat(&value));
     Ok(PreparedChat {
         request: PreparedChatRequest {
