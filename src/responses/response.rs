@@ -1,7 +1,22 @@
 use super::*;
 
+/// Optional host-specific cleanup applied to assistant text.
+///
+/// It is called for non-streaming content and for every streaming text delta.
+pub type ResponseCleaner = fn(&str) -> String;
+
 /// Translates a non-streaming Chat completion into a Responses object.
 pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result<Value, String> {
+    chat_to_responses_with_cleaner(chat, model, shape, None)
+}
+
+/// Translates a Chat completion with an optional product-specific cleaner.
+pub fn chat_to_responses_with_cleaner(
+    chat: &Value,
+    model: &str,
+    shape: &ToolShape,
+    cleaner: Option<ResponseCleaner>,
+) -> Result<Value, String> {
     let chat_id = chat
         .get("id")
         .and_then(Value::as_str)
@@ -30,7 +45,7 @@ pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result
             Some(Value::String(content)) => {
                 let (reasoning, answer) = split_leading_think_block(content);
                 inline_reasoning = reasoning;
-                push_output_text(&mut content_parts, &answer);
+                push_output_text(&mut content_parts, &clean_text(cleaner, &answer));
             }
             Some(Value::Array(parts)) => {
                 for part in parts {
@@ -41,7 +56,7 @@ pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result
                                 if inline_reasoning.is_none() {
                                     inline_reasoning = reasoning;
                                 }
-                                push_output_text(&mut content_parts, &answer);
+                                push_output_text(&mut content_parts, &clean_text(cleaner, &answer));
                             }
                         }
                         Some("refusal") => {
@@ -134,6 +149,12 @@ pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result
         response["system_fingerprint"] = fingerprint.clone();
     }
     Ok(response)
+}
+
+fn clean_text(cleaner: Option<ResponseCleaner>, text: &str) -> String {
+    cleaner
+        .map(|cleaner| cleaner(text))
+        .unwrap_or_else(|| text.to_string())
 }
 
 fn push_output_text(parts: &mut Vec<Value>, text: &str) {

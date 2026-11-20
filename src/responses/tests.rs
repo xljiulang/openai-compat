@@ -4,6 +4,62 @@ use super::*;
 use bytes::Bytes;
 use serde_json::json;
 
+fn test_cleaner(text: &str) -> String {
+    text.replace("secret", "redacted")
+}
+
+#[test]
+fn non_stream_cleaner_changes_only_text_outputs() {
+    let chat = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "secret text",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "secret_tool", "arguments": "{\"value\":\"secret\"}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let response =
+        chat_to_responses_with_cleaner(&chat, "model", &ToolShape::default(), Some(test_cleaner))
+            .unwrap();
+
+    assert_eq!(response["output"][0]["content"][0]["text"], "redacted text");
+    assert_eq!(response["output"][1]["name"], "secret_tool");
+    assert_eq!(response["output"][1]["arguments"], "{\"value\":\"secret\"}");
+}
+
+#[test]
+fn stream_cleaner_changes_only_text_deltas() {
+    let mut stream = ResponsesStream::with_shape_and_cleaner(
+        "resp_clean".to_string(),
+        "model".to_string(),
+        ToolShape::default(),
+        Some(test_cleaner),
+    );
+    let events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "reasoning_content": "secret reasoning",
+                "content": "secret text"
+            },
+            "finish_reason": "stop"
+        }]
+    }));
+    let joined = events
+        .iter()
+        .map(|event| String::from_utf8_lossy(event))
+        .collect::<String>();
+
+    assert!(joined.contains("secret reasoning"));
+    assert!(joined.contains("redacted text"));
+    assert!(!joined.contains("secret text"));
+}
+
 fn terminal_response(events: &[Bytes], event_name: &str) -> Value {
     for event in events {
         let event = std::str::from_utf8(event).unwrap();

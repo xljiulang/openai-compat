@@ -2,6 +2,12 @@ use super::*;
 use bytes::Bytes;
 use std::io::Write as _;
 
+fn clean_text(cleaner: Option<ResponseCleaner>, text: &str) -> String {
+    cleaner
+        .map(|cleaner| cleaner(text))
+        .unwrap_or_else(|| text.to_string())
+}
+
 #[derive(Clone)]
 pub(super) struct TextTrack {
     id: String,
@@ -54,6 +60,7 @@ pub struct ResponsesStream {
     usage: Option<Value>,
     failure: Option<Failure>,
     finished: bool,
+    cleaner: Option<ResponseCleaner>,
 }
 
 impl ResponsesStream {
@@ -64,6 +71,16 @@ impl ResponsesStream {
 
     /// Creates a translator with request-local tool metadata.
     pub fn with_shape(response_id: String, model: String, shape: ToolShape) -> Self {
+        Self::with_shape_and_cleaner(response_id, model, shape, None)
+    }
+
+    /// Creates a translator with a host-specific assistant text cleaner.
+    pub fn with_shape_and_cleaner(
+        response_id: String,
+        model: String,
+        shape: ToolShape,
+        cleaner: Option<ResponseCleaner>,
+    ) -> Self {
         Self {
             response_id,
             model,
@@ -85,6 +102,7 @@ impl ResponsesStream {
             usage: None,
             failure: None,
             finished: false,
+            cleaner,
         }
     }
 
@@ -147,7 +165,8 @@ impl ResponsesStream {
             }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
-                    events.extend(self.inline_content_delta(content));
+                    let content = clean_text(self.cleaner, content);
+                    events.extend(self.inline_content_delta(&content));
                 }
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {

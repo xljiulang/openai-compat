@@ -23,7 +23,9 @@ pub use request::{
     responses_to_chat, responses_to_chat_with_options, unsupported_feature_names,
     TranslationOptions,
 };
-pub use response::{chat_to_responses, usage_to_responses};
+pub use response::{
+    chat_to_responses, chat_to_responses_with_cleaner, usage_to_responses, ResponseCleaner,
+};
 pub use stream::ResponsesStream;
 pub use tools::ToolShape;
 

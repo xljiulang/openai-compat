@@ -6,7 +6,7 @@
 
 use crate::ChatError;
 use bytes::Bytes;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 /// Maximum size of a complete Chat response for non-streaming clients.
@@ -16,7 +16,7 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct PreparedChatRequest {
     /// Body sent to the upstream.
-    pub body: Bytes,
+    body: Option<Bytes>,
     /// Whether the original client requested SSE.
     pub downstream_stream: bool,
     /// Model requested by the client.
@@ -25,21 +25,53 @@ pub struct PreparedChatRequest {
     pub valid_json_object: bool,
 }
 
+/// Prepared Chat request plus the parsed value and byte-rewrite state.
+pub struct PreparedChat {
+    pub request: PreparedChatRequest,
+    /// Parsed request for host-specific prompt policies.
+    pub value: Option<Value>,
+    /// Whether the body differs from the original request bytes.
+    pub body_changed: bool,
+}
+
+impl PreparedChat {
+    /// Returns a replacement body when the library changed it.
+    pub fn rewritten_body(&self) -> Option<Bytes> {
+        self.request.body.clone()
+    }
+
+    /// Replaces the upstream body after a host-specific mutation.
+    pub fn set_body(&mut self, body: Bytes) {
+        self.request.body = Some(body);
+        self.body_changed = true;
+    }
+}
+
+/// Parses a valid Chat JSON object (not an array) without rewriting it.
+pub fn parse_chat_request(bytes: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .filter(Value::is_object)
+}
+
 /// Parses a Chat request and forces `stream:true` for the upstream.
 ///
-/// Valid JSON objects are parsed so callers can apply their own mutations to
-/// the returned value. Non-object bodies are returned unchanged.
-pub fn prepare_chat_request(bytes: &[u8]) -> (PreparedChatRequest, Option<Value>) {
+/// Valid JSON objects are returned to the caller for host-specific mutations.
+/// Transport compression is deliberately left to the host: callers should use
+/// [`force_top_level_stream_true`] when they want to preserve the original bytes
+/// while only changing the top-level `stream` field.
+pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
     let Ok(Value::Object(mut object)) = serde_json::from_slice::<Value>(bytes) else {
-        return (
-            PreparedChatRequest {
-                body: Bytes::copy_from_slice(bytes),
+        return PreparedChat {
+            request: PreparedChatRequest {
+                body: None,
                 downstream_stream: false,
                 requested_model: String::new(),
                 valid_json_object: false,
             },
-            None,
-        );
+            value: None,
+            body_changed: false,
+        };
     };
     let downstream_stream = object
         .get("stream")
@@ -50,18 +82,130 @@ pub fn prepare_chat_request(bytes: &[u8]) -> (PreparedChatRequest, Option<Value>
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let stream_was_true = object.get("stream") == Some(&Value::Bool(true));
     object.insert("stream".to_string(), Value::Bool(true));
     let value = Value::Object(object);
-    let body = Bytes::from(serde_json::to_vec(&value).expect("JSON values serialize"));
-    (
-        PreparedChatRequest {
-            body,
+    let changed = !stream_was_true;
+    let body_changed = changed;
+    PreparedChat {
+        request: PreparedChatRequest {
+            body: body_changed.then(|| force_top_level_stream_true(bytes)),
             downstream_stream,
             requested_model,
             valid_json_object: true,
         },
-        Some(value),
-    )
+        value: Some(value),
+        body_changed,
+    }
+}
+
+/// Replaces only the top-level `stream` value, preserving all other bytes.
+///
+/// Invalid JSON or nested `stream` fields are returned unchanged. This mirrors
+/// prefix-preserving behavior used by compatibility gateways.
+pub fn force_top_level_stream_true(bytes: &[u8]) -> Bytes {
+    let Some(object_start) = bytes.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return Bytes::copy_from_slice(bytes);
+    };
+    if bytes[object_start] != b'{' {
+        return Bytes::copy_from_slice(bytes);
+    }
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = object_start + 1;
+    let mut closing = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                if depth == 1 {
+                    let key_start = index + 1;
+                    let mut key_end = key_start;
+                    let mut key_escaped = false;
+                    while key_end < bytes.len() {
+                        if key_escaped {
+                            key_escaped = false;
+                        } else if bytes[key_end] == b'\\' {
+                            key_escaped = true;
+                        } else if bytes[key_end] == b'"' {
+                            break;
+                        }
+                        key_end += 1;
+                    }
+                    if key_end < bytes.len() && &bytes[key_start..key_end] == b"stream" {
+                        let mut value_start = key_end + 1;
+                        while value_start < bytes.len()
+                            && (bytes[value_start].is_ascii_whitespace()
+                                || bytes[value_start] == b':')
+                        {
+                            value_start += 1;
+                        }
+                        let mut value_end = value_start;
+                        while value_end < bytes.len() && !matches!(bytes[value_end], b',' | b'}') {
+                            value_end += 1;
+                        }
+                        while value_end > value_start && bytes[value_end - 1].is_ascii_whitespace()
+                        {
+                            value_end -= 1;
+                        }
+                        return match &bytes[value_start..value_end] {
+                            b"true" => Bytes::new(),
+                            b"false" => {
+                                let mut replaced =
+                                    Vec::with_capacity(bytes.len().saturating_sub(4));
+                                replaced.extend_from_slice(&bytes[..value_start]);
+                                replaced.extend_from_slice(b"true");
+                                replaced.extend_from_slice(&bytes[value_end..]);
+                                Bytes::from(replaced)
+                            }
+                            _ => Bytes::copy_from_slice(bytes),
+                        };
+                    }
+                }
+                in_string = true;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    closing = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if depth != 0 {
+        return Bytes::copy_from_slice(bytes);
+    }
+    if let (Some(closing), true) = (closing, true) {
+        let previous = bytes[..closing]
+            .iter()
+            .rfind(|byte| !byte.is_ascii_whitespace())
+            .copied();
+        let mut inserted = Vec::with_capacity(bytes.len() + 15);
+        inserted.extend_from_slice(&bytes[..closing]);
+        if !matches!(previous, Some(b'{') | Some(b',')) {
+            inserted.push(b',');
+        }
+        inserted.extend_from_slice(b"\"stream\":true");
+        inserted.extend_from_slice(&bytes[closing..]);
+        return Bytes::from(inserted);
+    }
+    Bytes::copy_from_slice(bytes)
 }
 
 /// Re-encodes a value after a host-specific mutation.
@@ -110,8 +254,13 @@ impl ChatCompletionAccumulator {
             self.saw_done = true;
             return Ok(());
         }
-        let chunk: Value = serde_json::from_str(payload)
-            .map_err(|error| ChatError::new("upstream_server_error", "upstream_error", format!("无效 SSE JSON: {error}")))?;
+        let chunk: Value = serde_json::from_str(payload).map_err(|error| {
+            ChatError::new(
+                "upstream_server_error",
+                "upstream_error",
+                format!("无效 SSE JSON: {error}"),
+            )
+        })?;
         if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
             return Err(normalized_chat_error(error));
         }
@@ -122,32 +271,53 @@ impl ChatCompletionAccumulator {
                 || (chunk.get("base_resp").is_some() && chunk.get("usage").is_none());
             if has_error_shape || !matches!(chunk, Value::Object(_)) {
                 return Err(ChatError {
-                    code: normalized.code.unwrap_or_else(|| "upstream_error".to_string()),
+                    code: normalized
+                        .code
+                        .unwrap_or_else(|| "upstream_error".to_string()),
                     error_type: normalized.error_type,
                     message: normalized.message,
                     param: normalized.param,
                 });
             }
         }
-        if let Some(id) = chunk.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+        if let Some(id) = chunk
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
             self.id = Some(id.to_string());
         }
         if let Some(created) = chunk.get("created").and_then(Value::as_u64) {
             self.created = Some(created);
         }
-        if let Some(model) = chunk.get("model").and_then(Value::as_str).filter(|model| !model.is_empty()) {
+        if let Some(model) = chunk
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+        {
             self.model = Some(model.to_string());
         }
-        if let Some(fingerprint) = chunk.get("system_fingerprint").filter(|value| !value.is_null()) {
+        if let Some(fingerprint) = chunk
+            .get("system_fingerprint")
+            .filter(|value| !value.is_null())
+        {
             self.system_fingerprint = Some(fingerprint.clone());
         }
         if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
             self.usage = Some(usage.clone());
         }
-        for choice in chunk.get("choices").and_then(Value::as_array).into_iter().flatten() {
+        for choice in chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let index = choice.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             let state = self.choices.entry(index).or_default();
-            let delta = choice.get("delta").or_else(|| choice.get("message")).unwrap_or(&Value::Null);
+            let delta = choice
+                .get("delta")
+                .or_else(|| choice.get("message"))
+                .unwrap_or(&Value::Null);
             match delta.get("content") {
                 Some(Value::String(content)) => {
                     state.has_content = true;
@@ -159,15 +329,23 @@ impl ChatCompletionAccumulator {
                 }
                 _ => {}
             }
-            if let Some(refusal) = delta.get("refusal").and_then(Value::as_str).filter(|refusal| !refusal.is_empty()) {
+            if let Some(refusal) = delta
+                .get("refusal")
+                .and_then(Value::as_str)
+                .filter(|refusal| !refusal.is_empty())
+            {
                 state.has_content = true;
-                state.content_parts.push(json!({"type": "refusal", "refusal": refusal}));
+                state
+                    .content_parts
+                    .push(json!({"type": "refusal", "refusal": refusal}));
             }
             if let Some(reasoning) = crate::responses::reasoning_text(delta) {
                 state.reasoning_content.push_str(&reasoning);
             }
             if let Some(function_call) = delta.get("function_call") {
-                let legacy = state.legacy_function_call.get_or_insert_with(Default::default);
+                let legacy = state
+                    .legacy_function_call
+                    .get_or_insert_with(Default::default);
                 if let Some(name) = function_call.get("name").and_then(Value::as_str) {
                     legacy.name = name.to_string();
                 }
@@ -175,10 +353,20 @@ impl ChatCompletionAccumulator {
                     legacy.arguments.push_str(arguments);
                 }
             }
-            for tool in delta.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
-                let tool_index = aggregate_tool_key(&state.tool_calls, &mut self.next_tool_key, tool);
+            for tool in delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let tool_index =
+                    aggregate_tool_key(&state.tool_calls, &mut self.next_tool_key, tool);
                 let tool_state = state.tool_calls.entry(tool_index).or_default();
-                if let Some(id) = tool.get("id").and_then(Value::as_str) {
+                if let Some(id) = tool
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
                     tool_state.id = id.to_string();
                 }
                 if let Some(kind) = tool.get("type").and_then(Value::as_str) {
@@ -187,12 +375,17 @@ impl ChatCompletionAccumulator {
                 if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
                     tool_state.name = name.to_string();
                 }
-                if let Some(arguments) = tool.pointer("/function/arguments").and_then(Value::as_str) {
+                if let Some(arguments) = tool.pointer("/function/arguments").and_then(Value::as_str)
+                {
                     tool_state.saw_arguments = true;
                     tool_state.arguments.push_str(arguments);
                 }
             }
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).filter(|reason| !reason.is_empty()) {
+            if let Some(reason) = choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+            {
                 if state.finish_reason.is_none() {
                     state.finish_reason = Some(reason.to_string());
                     self.saw_finish = true;
@@ -210,10 +403,18 @@ impl ChatCompletionAccumulator {
     /// Builds the standard non-streaming Chat completion.
     pub fn finish(self, requested_model: &str) -> Result<Value, ChatError> {
         if !self.saw_done && !self.saw_finish {
-            return Err(ChatError::new("incomplete_stream", "upstream_error", "上游 SSE 缺少完成分片或 [DONE]"));
+            return Err(ChatError::new(
+                "incomplete_stream",
+                "upstream_error",
+                "上游 SSE 缺少完成分片或 [DONE]",
+            ));
         }
         if self.choices.is_empty() {
-            return Err(ChatError::new("incomplete_stream", "upstream_error", "上游 SSE 已完成但没有有效输出"));
+            return Err(ChatError::new(
+                "incomplete_stream",
+                "upstream_error",
+                "上游 SSE 已完成但没有有效输出",
+            ));
         }
         let choices = self.choices.into_iter().map(|(index, mut choice)| {
             if choice.finish_reason.is_none() {
@@ -272,7 +473,7 @@ impl ChatCompletionAccumulator {
         let mut completion = json!({
             "id": self.id.unwrap_or_else(|| format!("chatcmpl_{}", now_millis())),
             "object": "chat.completion",
-            "created": self.created.unwrap_or_else(|| now_seconds()),
+            "created": self.created.unwrap_or_else(now_seconds),
             "model": self.model.unwrap_or_else(|| requested_model.to_string()),
             "choices": choices
         });
@@ -298,15 +499,24 @@ pub fn process_sse_line(acc: &mut ChatCompletionAccumulator, line: &[u8]) -> Res
 fn normalized_chat_error(value: &Value) -> ChatError {
     let normalized = crate::responses::normalize_chat_error(Some(value));
     ChatError {
-        code: normalized.code.unwrap_or_else(|| "upstream_error".to_string()),
+        code: normalized
+            .code
+            .unwrap_or_else(|| "upstream_error".to_string()),
         error_type: normalized.error_type,
         message: normalized.message,
         param: normalized.param,
     }
 }
 
-fn aggregate_tool_key(calls: &BTreeMap<usize, AggregateToolCall>, next_key: &mut usize, tool: &Value) -> usize {
-    let id = tool.get("id").and_then(Value::as_str).filter(|id| !id.is_empty());
+fn aggregate_tool_key(
+    calls: &BTreeMap<usize, AggregateToolCall>,
+    next_key: &mut usize,
+    tool: &Value,
+) -> usize {
+    let id = tool
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
     if let Some(id) = id {
         if let Some((key, _)) = calls.iter().find(|(_, state)| state.id == id) {
             return *key;
@@ -358,38 +568,45 @@ mod tests {
     #[test]
     fn preparation_forces_upstream_stream_and_keeps_client_intent() {
         let input = br#"{"model":"deepseek-v4","stream":false}"#;
-        let (prepared, value) = prepare_chat_request(input);
-        let value = value.expect("valid JSON object should be parsed");
+        let prepared = prepare_chat_request(input);
+        let value = prepared
+            .value
+            .as_ref()
+            .expect("valid JSON object should be parsed");
 
         assert_eq!(value["stream"], true);
-        assert!(!prepared.downstream_stream);
-        assert_eq!(prepared.requested_model, "deepseek-v4");
-        let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert!(!prepared.request.downstream_stream);
+        assert_eq!(prepared.request.requested_model, "deepseek-v4");
+        assert!(prepared.body_changed);
+        let body: Value = serde_json::from_slice(&prepared.rewritten_body().unwrap()).unwrap();
         assert_eq!(body["stream"], true);
     }
 
     #[test]
     fn preparation_defaults_missing_stream_to_non_streaming() {
         let input = br#"{"model":"model"}"#;
-        let (prepared, value) = prepare_chat_request(input);
-        let value = value.unwrap();
+        let prepared = prepare_chat_request(input);
+        let value = prepared.value.as_ref().unwrap();
 
         assert_eq!(value["stream"], true);
-        assert!(!prepared.downstream_stream);
+        assert!(!prepared.request.downstream_stream);
+        assert!(prepared.body_changed);
     }
 
     #[test]
     fn preparation_preserves_original_streaming_intent_and_non_json_body() {
         let input = br#"{"model":"model","stream":true}"#;
-        let (prepared, value) = prepare_chat_request(input);
-        assert_eq!(value.unwrap()["stream"], true);
-        assert!(prepared.downstream_stream);
+        let prepared = prepare_chat_request(input);
+        assert_eq!(prepared.value.as_ref().unwrap()["stream"], true);
+        assert!(prepared.request.downstream_stream);
+        assert!(!prepared.body_changed);
 
-        let (prepared, value) = prepare_chat_request(b"not json");
-        assert!(!prepared.valid_json_object);
-        assert!(!prepared.downstream_stream);
-        assert_eq!(prepared.body.as_ref(), b"not json");
-        assert!(value.is_none());
+        let prepared = prepare_chat_request(b"not json");
+        assert!(!prepared.request.valid_json_object);
+        assert!(!prepared.request.downstream_stream);
+        assert!(prepared.rewritten_body().is_none());
+        assert!(prepared.value.is_none());
+        assert!(!prepared.body_changed);
     }
 
     #[test]
