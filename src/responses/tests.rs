@@ -60,6 +60,39 @@ fn stream_cleaner_changes_only_text_deltas() {
     assert!(!joined.contains("secret text"));
 }
 
+#[test]
+fn translated_chat_never_contains_developer_roles() {
+    let request = json!({
+        "model": "model",
+        "instructions": "root",
+        "input": [{
+            "type": "message",
+            "role": "developer",
+            "content": "rules"
+        }, {
+            "type": "message",
+            "role": "user",
+            "content": "hello"
+        }]
+    });
+    let chat = responses_to_chat(&request, true).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert!(messages.iter().all(|message| {
+        !message["role"]
+            .as_str()
+            .is_some_and(|role| role.eq_ignore_ascii_case("developer"))
+    }));
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .count(),
+        1
+    );
+    assert_eq!(messages[0]["content"], "root\n\nrules");
+}
+
 fn terminal_response(events: &[Bytes], event_name: &str) -> Value {
     for event in events {
         let event = std::str::from_utf8(event).unwrap();

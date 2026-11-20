@@ -162,6 +162,7 @@ pub fn responses_to_chat_with_options(
             object.remove("parallel_tool_calls");
         }
     }
+    let _ = crate::chat::normalize_roles(&mut chat);
     Ok(chat)
 }
 

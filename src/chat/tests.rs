@@ -45,6 +45,37 @@ fn preparation_preserves_original_streaming_intent_and_non_json_body() {
 }
 
 #[test]
+fn preparation_normalizes_developer_roles_by_default() {
+    let input = br#"{"model":"model","stream":true,"messages":[{"role":"developer","content":"rules"},{"role":"DEVELOPER","content":"more"},{"role":"user","content":"hello"},{"role":"assistant","content":"ok"},{"role":"tool","content":"result"}]}"#;
+    let prepared = prepare_chat_request(input);
+    let value = prepared.value.as_ref().unwrap();
+
+    assert_eq!(prepared.role_changes().developer_to_system, 2);
+    assert!(prepared.body_changed);
+    assert_eq!(value["messages"][0]["role"], "system");
+    assert_eq!(value["messages"][1]["role"], "system");
+    assert_eq!(value["messages"][0]["content"], "rules");
+    assert_eq!(value["messages"][1]["content"], "more");
+    assert_eq!(value["messages"][2]["role"], "user");
+    assert_eq!(value["messages"][3]["role"], "assistant");
+    assert_eq!(value["messages"][4]["role"], "tool");
+    let upstream = serde_json::from_slice::<Value>(&prepared.rewritten_body().unwrap()).unwrap();
+    assert_eq!(upstream["messages"][0]["role"], "system");
+    assert_eq!(upstream["messages"][1]["role"], "system");
+}
+
+#[test]
+fn preparation_reuses_bytes_when_roles_are_already_normalized() {
+    let input =
+        br#"{"model":"model","stream":true,"messages":[{"role":"system","content":"rules"}]}"#;
+    let prepared = prepare_chat_request(input);
+
+    assert_eq!(prepared.role_changes(), RoleChanges::default());
+    assert!(!prepared.body_changed);
+    assert!(prepared.rewritten_body().is_none());
+}
+
+#[test]
 fn aggregation_combines_text_reasoning_and_tools() {
     let mut accumulator = ChatCompletionAccumulator::default();
     process_sse_line(

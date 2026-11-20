@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 
 /// Maximum size of a complete Chat response for non-streaming clients.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// Rule identifier used when hosts log role compatibility changes.
+pub const ROLE_RULE_ID: &str = "compat/developer-role";
 
 /// Chat request after compatibility preparation.
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ pub struct PreparedChat {
     pub value: Option<Value>,
     /// Whether the body differs from the original request bytes.
     pub body_changed: bool,
+    role_changes: RoleChanges,
 }
 
 impl PreparedChat {
@@ -44,6 +47,11 @@ impl PreparedChat {
     pub fn set_body(&mut self, body: Bytes) {
         self.request.body = Some(body);
         self.body_changed = true;
+    }
+
+    /// Reports developer role conversions performed during preparation.
+    pub fn role_changes(&self) -> RoleChanges {
+        self.role_changes
     }
 }
 
@@ -69,6 +77,7 @@ pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
             },
             value: None,
             body_changed: false,
+            role_changes: RoleChanges::default(),
         };
     };
     let downstream_stream = object
@@ -82,18 +91,67 @@ pub fn prepare_chat_request(bytes: &[u8]) -> PreparedChat {
         .to_string();
     let stream_was_true = object.get("stream") == Some(&Value::Bool(true));
     object.insert("stream".to_string(), Value::Bool(true));
-    let value = Value::Object(object);
-    let body_changed = !stream_was_true;
+    let mut value = Value::Object(object);
+    let role_changes = normalize_roles(&mut value);
+    let role_changed = role_changes.developer_to_system > 0;
+    let body_changed = !stream_was_true || role_changed;
     PreparedChat {
         request: PreparedChatRequest {
-            body: body_changed.then(|| force_top_level_stream_true(bytes)),
+            body: (!stream_was_true || role_changed).then(|| {
+                if role_changed {
+                    encode_chat(&value)
+                } else {
+                    force_top_level_stream_true(bytes)
+                }
+            }),
             downstream_stream,
             requested_model,
             valid_json_object: true,
         },
         value: Some(value),
         body_changed,
+        role_changes,
     }
+}
+
+/// Number of message roles normalized for Chat upstream compatibility.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoleChanges {
+    /// Messages changed from `developer` to `system`.
+    pub developer_to_system: usize,
+}
+
+impl RoleChanges {
+    /// Returns true when at least one role was changed.
+    pub fn changed(self) -> bool {
+        self.developer_to_system > 0
+    }
+}
+
+/// Normalizes message roles accepted by Chat upstreams.
+///
+/// The upstream only accepts `system` for developer instructions. The match is
+/// ASCII case-insensitive; every other role and all message content is left
+/// untouched.
+pub fn normalize_roles(value: &mut Value) -> RoleChanges {
+    let mut changes = RoleChanges::default();
+    let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
+        return changes;
+    };
+    for message in messages {
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        let is_developer = object
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| role.eq_ignore_ascii_case("developer"));
+        if is_developer {
+            object.insert("role".to_string(), Value::String("system".to_string()));
+            changes.developer_to_system += 1;
+        }
+    }
+    changes
 }
 
 /// Replaces only the top-level `stream` value, preserving all other bytes.
